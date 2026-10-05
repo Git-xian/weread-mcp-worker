@@ -262,6 +262,20 @@ python tools/coread-export.py ./weread-data/books/你的书 coread.json
 
 ---
 
+# 自测
+
+```bash
+node test/smoke.mjs              # MCP 端点：tools/list（14 个）+ 未知工具兜底
+node test/smoke-coread.mjs       # POST/GET /coread：鉴权、结构校验、写入（11 项）
+node test/smoke-dashboard.mjs    # 看板结构断言（书卡/汇总/搜索/批注区）
+node test/smoke-epub-parse.mjs   # 浏览器内 EPUB 解析：stored + deflate（17 项）
+
+npm i -D jsdom                   # 仅在要跑下面这条前端交互测试时需要
+node test/smoke-dashboard-dom.mjs  # 保存按钮 / 页尾下载 / 批注增删（jsdom 真跑）
+```
+
+---
+
 # 安全边界
 
 - `WEREAD_API_KEY` 只存在于服务端（Worker Secret / 服务器 `.env`），不进代码、不进日志、不进任何回包。
