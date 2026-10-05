@@ -15,10 +15,11 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: "8787"
+      # 共读数据落点：看板上拖入 EPUB 会写到这里（宿主机 ./data/coread.json 持久化）
+      COREAD_FILE: ${COREAD_FILE:-/data/coread.json}
     volumes:
-      # 共读数据（可选）：把 coread.json 放进 deploy/data/，并在 .env 里设
-      # COREAD_FILE=/data/coread.json（看板「📖 共读」Tab 才有原书逐段对照）
-      - ./data:/data:ro
+      # 共读数据（可选）：看板导入的原书会保存在这，重建容器不丢
+      - ./data:/data
     expose:
       - "8787"
     networks: [weread]

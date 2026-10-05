@@ -102,9 +102,14 @@ function coreadHtml(coread) {
       <textarea id="edit-user" placeholder="🟡 你的批注…" oninput="autoSave()"></textarea>
       <textarea id="edit-ai" placeholder="🔵 助手的批注…" oninput="autoSave()"></textarea>
       <div class="ed-row">
-        <button class="dl" onclick="downloadNotes()">⬇ 下载批注</button>
-        <span class="hint">输入即自动暂存（本机不丢）；下载 JSON 发给助手即长期保存</span>
+        <button class="sv" onclick="saveNow()" id="btn-save">💾 保存</button>
+        <span class="hint" id="save-hint">输入即自动暂存到本机；点「保存」立即写入</span>
       </div>
+    </div>`);
+  // 页尾操作条：整页批注统一在这里导出
+  parts.push(`<div class="cr-foot">
+      <button class="dl" onclick="downloadNotes()">⬇ 下载批注</button>
+      <span class="hint" id="foot-hint"></span>
     </div></div>`);
   return parts.join("");
 }
@@ -144,14 +149,42 @@ function pick(id){
   var n=COREAD_NOTES[String(id)]||{};
   document.getElementById('edit-user').value=n.user||'';
   document.getElementById('edit-ai').value=n.ai||'';
+  setSaveHint('已载入本机暂存内容');
+}
+// 把当前编辑框写进内存 + localStorage（空白则视为删除该段批注）
+function commitNote(){
+  if(cur==null) return;
+  var u=document.getElementById('edit-user').value, a=document.getElementById('edit-ai').value;
+  var k=String(cur), el=document.getElementById('seg-'+cur);
+  if(u.trim()||a.trim()){
+    COREAD_NOTES[k]={user:u,ai:a,ts:Date.now()};
+    if(el)renderNotes(el,COREAD_NOTES[k]);
+  }else{
+    delete COREAD_NOTES[k];
+    if(el)renderNotes(el,{});
+  }
+  persist(); refreshFoot();
+}
+function noteCount(){
+  var n=0; for(var k in COREAD_NOTES){var v=COREAD_NOTES[k]; if(v&&(v.user||v.ai))n++} return n;
+}
+function refreshFoot(){
+  var el=document.getElementById('foot-hint');
+  if(el) el.textContent='已暂存 '+noteCount()+' 条批注（存在本机浏览器）· 下载 JSON 发给助手即长期保存';
+}
+function setSaveHint(msg,ok){
+  var h=document.getElementById('save-hint'); if(!h) return;
+  h.textContent=msg;
+  h.className='hint'+(ok?' ok':'');
+}
+function saveNow(){
+  commitNote();
+  var b=document.getElementById('btn-save');
+  if(b){var old=b.textContent;b.textContent='✓ 已保存';b.classList.add('done');setTimeout(function(){b.textContent=old;b.classList.remove('done')},1200)}
+  setSaveHint('✓ 已保存到本机 · '+new Date().toLocaleTimeString(),true);
 }
 function downloadNotes(){
-  var u=document.getElementById('edit-user').value, a=document.getElementById('edit-ai').value;
-  if(cur!=null && (u||a)){
-    COREAD_NOTES[String(cur)]={user:u,ai:a,ts:Date.now()};
-    renderNotes(document.getElementById('seg-'+cur), COREAD_NOTES[String(cur)]);
-  }
-  persist();
+  commitNote();
   var blob=new Blob([JSON.stringify(COREAD_NOTES,null,2)],{type:'application/json'});
   var aEl=document.createElement('a');
   aEl.href=URL.createObjectURL(blob);
@@ -159,20 +192,164 @@ function downloadNotes(){
   aEl.click();
   URL.revokeObjectURL(aEl.href);
 }
-// 输入即自动保存（停顿 600ms 后触发）
+// 输入即自动保存（停顿 600ms 后触发），保存按钮只是显式确认
 var _t=null;
 function autoSave(){
   if(cur==null)return;
   clearTimeout(_t);
-  _t=setTimeout(function(){
-    var u=document.getElementById('edit-user').value, a=document.getElementById('edit-ai').value;
-    if(u||a){
-      COREAD_NOTES[String(cur)]={user:u,ai:a,ts:Date.now()};
-      renderNotes(document.getElementById('seg-'+cur), COREAD_NOTES[String(cur)]);
-      persist();
-    }
-  },600);
+  _t=setTimeout(function(){commitNote();setSaveHint('已自动暂存 · 未点保存')},600);
 }
+refreshFoot();
+`;
+
+// ---------------------------------------------------------------------------
+// 浏览器内 EPUB 解析（纯函数，无 DOM 依赖 —— 可在 Node 里直接跑测试）
+// 与 tools/epub-split.py 同口径：找 .opf → 按 spine 顺序 → 抽段落。
+// 数据在用户设备本地拆，只把 {meta, segments} 上传，EPUB 原件不出本机。
+// ---------------------------------------------------------------------------
+export const EPUB_PARSE_JS = String.raw`
+function normPath(p){
+  var parts=String(p).split('/'),out=[];
+  for(var i=0;i<parts.length;i++){var x=parts[i];if(!x||x==='.')continue;if(x==='..'){out.pop();continue}out.push(x)}
+  return out.join('/');
+}
+var ENT={'amp':'&','lt':'<','gt':'>','quot':'"','apos':"'",'nbsp':' ','mdash':'\u2014','ndash':'\u2013','hellip':'\u2026','ldquo':'\u201c','rdquo':'\u201d','lsquo':'\u2018','rsquo':'\u2019','middot':'\u00b7','times':'\u00d7','copy':'\u00a9'};
+function entOf(l){ return Object.prototype.hasOwnProperty.call(ENT,l)?ENT[l]:'' }
+function decodeEnt(s){
+  return String(s).replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z][a-z0-9]*);/gi,function(_,m){
+    var l=m.toLowerCase();
+    if(l.charAt(0)==='#'){
+      var n=l.charAt(1)==='x'?parseInt(l.slice(2),16):parseInt(l.slice(1),10);
+      return (isNaN(n)||n<0||n>0x10ffff)?'':String.fromCodePoint(n);
+    }
+    return entOf(l);
+  });
+}
+function stripHtml(raw){
+  raw=String(raw).replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi,'');
+  var out=[],re=/<(p|h[1-6]|li|blockquote|div)[^>]*>([\s\S]*?)<\/\1>/gi,m;
+  while((m=re.exec(raw))){
+    var t=decodeEnt(m[2].replace(/<[^>]+>/g,'')).replace(/\s+/g,' ').trim();
+    if(t.length>=2) out.push(t);
+  }
+  if(!out.length){
+    var all=decodeEnt(raw.replace(/<[^>]+>/g,' ')).replace(/[ \t\u00a0]+/g,' ').trim();
+    if(all) out=all.split(/\n+/).map(function(x){return x.trim()}).filter(function(x){return x.length>=2});
+  }
+  return out;
+}
+async function unzip(buf){
+  var u8=buf instanceof Uint8Array?buf:new Uint8Array(buf);
+  var dv=new DataView(u8.buffer,u8.byteOffset,u8.byteLength);
+  var eocd=-1,i,lo=Math.max(0,u8.length-22-65535);
+  for(i=u8.length-22;i>=lo;i--){ if(dv.getUint32(i,true)===0x06054b50){eocd=i;break} }
+  if(eocd<0) throw new Error('不是有效的 EPUB（找不到 zip 结尾记录）');
+  var count=dv.getUint16(eocd+10,true),cdOff=dv.getUint32(eocd+16,true);
+  var files={},p=cdOff;
+  for(var k=0;k<count;k++){
+    if(dv.getUint32(p,true)!==0x02014b50) break;
+    var method=dv.getUint16(p+10,true),csize=dv.getUint32(p+20,true);
+    var nlen=dv.getUint16(p+28,true),elen=dv.getUint16(p+30,true),clen=dv.getUint16(p+32,true);
+    var lho=dv.getUint32(p+42,true);
+    var name=new TextDecoder('utf-8').decode(u8.subarray(p+46,p+46+nlen));
+    var lnlen=dv.getUint16(lho+26,true),lelen=dv.getUint16(lho+28,true);
+    var start=lho+30+lnlen+lelen;
+    files[normPath(name)]={method:method,data:u8.subarray(start,start+csize)};
+    p+=46+nlen+elen+clen;
+  }
+  return files;
+}
+async function entryText(e){
+  if(e.method===0) return new TextDecoder('utf-8').decode(e.data);
+  if(e.method===8){
+    var s=new Blob([e.data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    return await new Response(s).text();
+  }
+  throw new Error('EPUB 内有未支持的压缩方式（method='+e.method+'）');
+}
+async function parseEpub(buf,fileName,onStatus){
+  onStatus=onStatus||function(){};
+  onStatus('正在解析 EPUB 结构…');
+  var files=await unzip(buf),names=Object.keys(files),i;
+  var opfName=null;
+  for(i=0;i<names.length;i++){ if(/\.opf$/i.test(names[i])){opfName=names[i];break} }
+  var spine=[];
+  if(opfName){
+    var opf=await entryText(files[opfName]);
+    var base=opfName.replace(/[^\/]*$/,'');
+    var man={},m,reItem=/<item\b[^>]*>/gi;
+    while((m=reItem.exec(opf))){
+      var im=m[0].match(/\bid\s*=\s*"([^"]+)"/i),hm=m[0].match(/\bhref\s*=\s*"([^"]+)"/i);
+      if(im&&hm){
+        var href=hm[1];
+        try{ href=decodeURIComponent(href) }catch(e){}
+        man[im[1]]=normPath(base+href);
+      }
+    }
+    var reRef=/<itemref\b[^>]*\bidref\s*=\s*"([^"]+)"/gi;
+    while((m=reRef.exec(opf))){ var f=man[m[1]]; if(f&&files[f]) spine.push(f); }
+  }
+  if(!spine.length){
+    spine=names.filter(function(n){return /\.(xhtml|html|htm)$/i.test(n)}).sort();
+  }
+  var segments=[],chapters=[],id=0,ci;
+  for(ci=0;ci<spine.length;ci++){
+    var raw;
+    try{ raw=await entryText(files[spine[ci]]) }catch(e){ continue }
+    var tm=raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    var title=tm?decodeEnt(tm[1]).replace(/\s+/g,' ').trim():spine[ci].split('/').pop();
+    var blocks=stripHtml(raw);
+    if(!blocks.length) continue;
+    var start=id;
+    for(var pi=0;pi<blocks.length;pi++){ id++; segments.push({id:id,ch:ci,chTitle:title,text:blocks[pi],user:'',ai:''}) }
+    chapters.push({idx:ci,title:title,segStart:start+1,segEnd:id});
+    if(ci%5===0) onStatus('已拆 '+ci+' 章 · '+id+' 段…');
+  }
+  return {meta:{book:fileName||'',chapters:chapters,totalSegments:segments.length},segments:segments};
+}
+`;
+
+// 导入交互（拖拽 / 选择文件 → 本地拆段 → POST /coread）
+export const IMPORT_JS = String.raw`
+function coreadToken(){
+  try{ return new URLSearchParams(location.search).get('token')||'' }catch(e){ return '' }
+}
+function setStatus(msg,cls){
+  var s=document.getElementById('up-status');
+  if(s){ s.textContent=msg; s.className='drop-s'+(cls?' '+cls:''); }
+}
+async function uploadCoread(payload){
+  setStatus('正在保存到服务器…');
+  var r=await fetch('coread',{method:'POST',headers:{'Authorization':'Bearer '+coreadToken(),'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  var j={}; try{ j=await r.json() }catch(e){}
+  if(r.status===401) throw new Error('口令不对：请用 /dashboard?token=<口令> 打开本页再上传');
+  if(!r.ok) throw new Error(j.error?j.error+(j.hint?('：'+j.hint):''):('服务器返回 '+r.status));
+  setStatus('✓ 已保存 '+j.segments+' 段，正在刷新…','ok');
+  setTimeout(function(){ location.reload() },900);
+}
+(function(){
+  var d=document.getElementById('drop'); if(!d) return;
+  function over(e){ e.preventDefault(); e.stopPropagation(); d.classList.add('over') }
+  function out(e){ e.preventDefault(); d.classList.remove('over') }
+  ['dragenter','dragover'].forEach(function(ev){ d.addEventListener(ev,over) });
+  ['dragleave','dragend','drop'].forEach(function(ev){ d.addEventListener(ev,out) });
+  async function handle(f){
+    if(!f) return;
+    if(!/\.epub$/i.test(f.name)){ setStatus('请选 .epub 文件（当前：'+f.name+'）','err'); return }
+    try{
+      setStatus('正在读取 '+f.name+' …');
+      var data=await parseEpub(await f.arrayBuffer(),f.name,setStatus);
+      if(!data.segments.length){ setStatus('这个 EPUB 没解析出段落，可能不是标准 EPUB','err'); return }
+      setStatus('拆出 '+data.segments.length+' 段，正在上传…');
+      await uploadCoread(data);
+    }catch(err){ setStatus('失败：'+((err&&err.message)||err),'err') }
+  }
+  d.addEventListener('drop',function(e){ handle(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) });
+  var inp=document.getElementById('epub-file');
+  if(inp) inp.addEventListener('change',function(){ handle(inp.files&&inp.files[0]) });
+  var pick=document.getElementById('epub-pick');
+  if(pick) pick.addEventListener('click',function(e){ e.preventDefault(); if(inp) inp.click() });
+})();
 `;
 
 // CSS（原版 weread_dashboard.py 的样式，逐条对齐）
@@ -225,8 +402,27 @@ h1{font-size:22px}.sub{color:var(--sub);font-size:13px;margin:4px 0 14px}
 textarea{width:100%;min-height:56px;font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;margin:4px 0}
 button{font:inherit;padding:7px 16px;border:0;border-radius:8px;background:var(--blue);color:#fff;cursor:pointer}
 button.dl{background:#6ba26b}
+button.sv{background:var(--blue)}
+button.sv.done{background:#4a9d6a}
 .ed-row{display:flex;align-items:center;gap:8px;margin-top:2px}
 .ed-row .hint{flex:1;font-size:11px}
+.hint.ok{color:#4a9d6a}
+.cr-foot{display:flex;align-items:center;gap:8px;margin-top:16px;padding-top:12px;border-top:1px dashed var(--line);flex-wrap:wrap}
+.cr-foot .hint{flex:1;font-size:11px;min-width:160px}
+details.imp{margin:10px 0 12px;border:1px solid var(--line);border-radius:10px;background:#fcfaf6;padding:8px 12px}
+details.imp>summary{cursor:pointer;font-size:13px;color:var(--sub);list-style:none}
+details.imp>summary::-webkit-details-marker{display:none}
+details.imp>summary::before{content:'▸ ';color:var(--sub)}
+details.imp[open]>summary::before{content:'▾ '}
+.drop{margin-top:10px;border:2px dashed #d9d1c1;border-radius:10px;background:#fff;padding:20px 14px;text-align:center;color:var(--sub);font-size:13px}
+.drop.over{border-color:var(--blue);background:#f2f7fd}
+.drop-i{font-size:26px;margin-bottom:4px}
+.drop .pick{color:var(--blue);text-decoration:underline;cursor:pointer}
+.drop-s{font-size:11px;margin-top:6px;line-height:1.6}
+.drop-s.err{color:#c05050}
+.drop-s.ok{color:#4a9d6a}
+.imp-note{font-size:11px;color:var(--sub);margin-top:8px;line-height:1.7}
+.imp-note code{background:#f2efe8;padding:1px 5px;border-radius:4px}
 #coread-json{margin-top:8px;padding:8px;background:#f6f4ee;border-radius:8px;font:11px/1.5 monospace;word-break:break-all;max-height:140px;overflow:auto;color:#7a7466}
 footer{margin-top:26px;text-align:center;color:var(--sub);font-size:12px}
 `;
@@ -320,8 +516,23 @@ export function render({ shelf, nbBooks, nbTotal, details }, { generatedAt, core
   const bookName = hasCoread ? coread.meta?.book || "?" : "";
   const crBook = hasCoread
     ? `<div class="cr-book">当前共读：<b>${esc(bookName)}</b>` +
-      `<span class="cr-book-sub">批注暂存在本机浏览器，点「下载批注」导出 JSON</span></div>`
-    : `<div class="cr-book">尚未导入共读书目<span class="cr-book-sub">把 EPUB 用 epub_split.py 拆段后，将 {meta, segments} 作为共读数据传入即可显示</span></div>`;
+      `<span class="cr-book-sub">批注暂存在本机浏览器；页尾「⬇ 下载批注」导出 JSON</span></div>`
+    : `<div class="cr-book">还没有共读书目` +
+      `<span class="cr-book-sub">把 EPUB 拖进下面方框，自动拆段并保存（本机解析，不上传原书）</span></div>`;
+
+  // 导入原书：拖入 EPUB → 浏览器本地拆段 → POST /coread。有书时折叠起来。
+  const importBlock =
+    `<details class="imp"${hasCoread ? "" : " open"}>` +
+    `<summary>📥 导入原书（把 EPUB 拖进来自动拆段）</summary>` +
+    `<div id="drop" class="drop">` +
+    `<div class="drop-i">📚</div>` +
+    `<div>把 <b>EPUB 文件</b>拖到这里，或 <a href="#" class="pick" id="epub-pick">选择文件</a></div>` +
+    `<input type="file" id="epub-file" accept=".epub,application/epub+zip" hidden>` +
+    `<div class="drop-s" id="up-status">拆段在你自己的设备上完成，只会把段落 JSON 传给服务器，EPUB 原件不出本机</div>` +
+    `</div>` +
+    `<div class="imp-note">导入新书会替换当前共读的那本。命令行同样可以：` +
+    `<code>python tools/coread-upload.py 书.epub --url &lt;本页地址&gt;</code></div>` +
+    `</details>`;
 
   const tabs =
     `<div class="tabs">\n` +
@@ -330,15 +541,17 @@ export function render({ shelf, nbBooks, nbTotal, details }, { generatedAt, core
     `</div>`;
 
   const coreadPage =
-    `<div id="page-coread" class="page"${hasCoread ? "" : " hidden"}>${crBook}` +
-    (crHtml || '<div class="panel"><div class="empty">还没有共读书目</div></div>') +
+    `<div id="page-coread" class="page"${hasCoread ? "" : " hidden"}>${crBook}${importBlock}` +
+    (crHtml || '<div class="panel"><div class="empty">还没有共读书目 —— 上面拖入一本 EPUB 即可</div></div>') +
     `</div>`;
 
   const shelfPage =
     `<div id="page-shelf" class="page"${hasCoread ? " hidden" : ""}>\n` +
     `<div class="sum-line">${summary}</div>\n` +
     `<input class="search" placeholder="搜索书名 / 作者 / 划线内容…">\n` +
-    `${cards}\n</div>`;
+    `${cards}\n` +
+    (hasCoread ? "" : `<div class="empty">📥 想把一本 EPUB 变成共读页？切到「📖 共读」Tab 拖进去就行</div>`) +
+    `</div>`;
 
   const date = generatedAt || new Date().toISOString().slice(0, 10);
 
@@ -365,7 +578,9 @@ c.querySelectorAll('.mark').forEach(function(m){m.style.display=m.querySelector(
 else{c.querySelectorAll('.mark').forEach(function(m){m.style.display=''})}
 })});
 ${COREAD_JS}
+${EPUB_PARSE_JS}
 loadPersisted();
+${IMPORT_JS}
 function go(w){
   document.querySelectorAll('.page').forEach(function(p){p.hidden=true});
   document.getElementById('page-'+w).hidden=false;

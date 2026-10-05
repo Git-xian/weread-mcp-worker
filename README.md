@@ -15,7 +15,7 @@
 
 - 传输：MCP **Streamable HTTP**（无状态），端点固定 `/mcp`
 - **看板**：内置 `GET /dashboard`，双 Tab（**📖 共读** + **📚 书架与笔记**），结构与桌面版 `weread_dashboard.py` 一致，手机浏览器直接打开
-- **原书上传**：`POST /coread` 把 EPUB 拆段后的共读数据传进服务（Workers 版存 KV），共读页才有原书逐段对照
+- **原书导入**：在看板「📖 共读」里**直接拖入 EPUB**，浏览器本地拆段后自动保存（Workers 存 KV / Node 存文件）；也有 `tools/coread-upload.py` 一条命令版本
 - 存储：MCP 端点**不需要数据库**，只有你的 `wrk-` key 放在服务端
 - 工具：14 个，覆盖搜索 / 书架 / 笔记 / 阅读统计 / 点评 / 推荐
 
@@ -33,7 +33,8 @@
 │   ├── src/        #   服务 + 网关客户端 + dashboard.js
 │   ├── Dockerfile
 │   └── .env.example
-├── tools/          # 本地预处理（不联网、不上传任何东西）
+├── tools/          # 本地预处理（除上传外都不联网）
+│   ├── coread-upload.py   # 一条命令：EPUB → 拆段 → 导出 → 上传
 │   ├── epub-split.py      # EPUB → segments.db + book.json（把书拆成段）
 │   └── coread-export.py   # segments.db → coread.json（看板吃的格式，含批注）
 ├── deploy/         # VPS 部署配置
@@ -103,17 +104,12 @@ npx wrangler dev                 # http://127.0.0.1:8787/mcp
 
 ## 上传原书（共读数据，可选）
 
-部署完默认只有「📚 书架与笔记」Tab。要让「📖 共读」显示**原书逐段对照**，需要把 EPUB 拆段后传上去 —— 完整步骤见下方 **[共读数据怎么来（上传原书）](#共读数据怎么来上传原书)**。
+部署完默认只有「📚 书架与笔记」Tab。要让「📖 共读」显示**原书逐段对照**：
 
-最省事的一条命令（前提：按 `wrangler.toml` 里的注释绑好 KV `COREAD_KV`）：
+打开 `https://<你的地址>/dashboard?token=<MCP_AUTH_TOKEN>` → **📖 共读** → **把 EPUB 拖进去**，搞定。（拆段在浏览器本地做，EPUB 原件不上传）
 
-```bash
-curl -X POST "https://weread-mcp.<子域>.workers.dev/coread" \
-     -H "Authorization: Bearer <MCP_AUTH_TOKEN>" \
-     --data-binary @coread.json
-```
-
-没绑 KV 会返回 400 并告诉你缺什么；传完用 `GET /coread?token=...` 核对。
+Cloudflare 上要先绑一个 KV（只做一次，见下方[共读数据](#共读数据怎么来导入原书)）；VPS / 本机不用配。
+命令行派可以用 `python tools/coread-upload.py 你的书.epub --url <地址> --token <口令>`。
 
 ## 国内访问提示
 
@@ -200,76 +196,64 @@ https://<你的地址>/dashboard?token=<MCP_AUTH_TOKEN>
 **📚 书架与笔记**（数据实时来自官方网关）
 汇总行 + 搜索框 + **书脊色条书卡**；点书名展开该书的划线 🟡 / 想法 💭，每条下方预留 🔵 助手批注位。
 
-**📖 共读**（需注入共读数据，见下）
-原版书**逐段对照**，点任意段落 → 写 🟡你的 / 🔵助手的批注；本机自动暂存，可「下载批注」导出 JSON。
+**📖 共读**（需导入原书，见下）
+原版书**逐段对照**：点任意段落 → 写 🟡你的 / 🔵助手的批注，编辑器里有 **💾 保存**（输入本来就会自动暂存，保存按钮用来确认）；
+**⬇ 下载批注** 统一放在**页尾**，导出整页批注 JSON。顶部「📥 导入原书」可随时拖入 / 替换 EPUB。
 
-## 共读数据怎么来（上传原书）
+## 共读数据怎么来（导入原书）
 
-> 说明白点：**不用上传 EPUB 原件**，产品里也没有「上传书」这种 UI。共读页吃的是**拆好段的 JSON**
-> —— `coread.json`（含每一段正文 + 你的批注），由下方本地脚本从 EPUB 生成。整本书生成出来通常 0.3–3 MB。
+**最省事：不用命令行，也不用上传 EPUB 原件。**
+打开看板 → 切到 **📖 共读** Tab → **把 EPUB 拖进去**。拆段在你自己的手机/电脑上完成，只有拆好的 JSON 传给服务器（Workers 存 KV，Node 存文件）。
 
-```bash
-# 1) 拆 EPUB → segments.db + book.json（纯标准库，不联网）
-python tools/epub-split.py 你的书.epub ./weread-data/books/你的书
-
-# 2) 导出成 coread.json（同目录若有 coread-notes.json 会一并写入）
-python tools/coread-export.py ./weread-data/books/你的书 coread.json
-
-# 可选：加 --b64 额外打印 base64url（只给下面「URL 内联」用）
+```
+https://<你的地址>/dashboard?token=<MCP_AUTH_TOKEN>
 ```
 
-### 传到 Cloudflare Workers
+### 不想用浏览器？一条命令
 
-**先绑 KV**（只做一次，二选一）：
+```bash
+python tools/coread-upload.py 你的书.epub --url https://<你的地址> --token <MCP_AUTH_TOKEN>
+```
 
-- **命令行**：`npx wrangler kv namespace create COREAD_KV` → 把返回的 `id` 填进 `wrangler.toml` 的 `[[kv_namespaces]]`（那里有注释模板）→ `npx wrangler deploy`
-- **控制台**：Cloudflare 后台 → **Storage & Databases → KV** → 建一个 namespace → 回到你的 Worker → **Settings → Bindings** → 添加 **KV namespace** 绑定，**变量名必须叫 `COREAD_KV`**
+自动完成「拆书 → 导出 → 上传」。只想手工分步也行：
 
-**再上传**（三选一，效果一样）：
+```bash
+python tools/epub-split.py 你的书.epub ./weread-data/books/你的书   # ① 拆段
+python tools/coread-export.py ./weread-data/books/你的书 coread.json # ② 导出
+curl -X POST "https://<你的地址>/coread" -H "Authorization: Bearer <口令>" --data-binary @coread.json  # ③ 上传
+```
 
-| 方式 | 命令 / 操作 | 适合 |
-|------|------------|------|
-| **HTTP 上传**（推荐） | `curl -X POST "https://<你的地址>/coread" -H "Authorization: Bearer <MCP_AUTH_TOKEN>" --data-binary @coread.json` | 有终端，一条命令搞定 |
-| **wrangler** | `npx wrangler kv key put coread --path coread.json --binding COREAD_KV --remote` | 本地已经在 wrangler 流程里 |
-| **控制台粘贴** | 后台进 KV → key 填 `coread` → 值粘贴 JSON 内容并保存 | 完全不想碰命令行 |
+> 整本书的 `coread.json` 通常 0.3–3 MB；KV 单值上限 25 MiB，放得下。
 
-核对是否传上去了（只回摘要，不回正文）：
+### 只做一次的准备
+
+| 部署形态 | 要配什么 |
+|----------|----------|
+| **Cloudflare** | 绑一个 KV：`npx wrangler kv namespace create COREAD_KV` → 把 id 填进 `wrangler.toml` 的 `[[kv_namespaces]]`（有注释模板）→ `npx wrangler deploy`<br>不想用命令行：后台 → Storage & Databases → KV 建库 → Worker → Settings → Bindings 加 **KV namespace**，变量名必须叫 `COREAD_KV` |
+| **VPS / 自己电脑** | 不用配。默认写到 `server/coread.json`，想换位置就设 `COREAD_FILE` |
+
+### 核对 / 换书
 
 ```bash
 curl "https://<你的地址>/coread?token=<MCP_AUTH_TOKEN>"
-# → {"bound":true,"uploaded":true,"book":"你的书.epub","segments":1234}
+# → {"uploaded":true,"book":"你的书.epub","segments":1234}
 ```
 
-> KV 单值上限 25 MiB，免费版 1 GB 存储——整本书绰绰有余。换书时重新导出、再传一次覆盖同一个 `coread` 键即可。
-
-### 传到 VPS / 自己电脑
-
-不用 KV，把文件丢到服务器上指个路径就行：
-
-```bash
-scp coread.json user@你的VPS:/srv/weread/coread.json
-# 服务器 .env 里加： COREAD_FILE=/srv/weread/coread.json
-```
-
-Node 版也支持临时用 `?coread=<本地文件路径 | base64url>` 指定。
-
-### URL 内联（只适合小样本）
-
-`/dashboard?token=xxx&coread=<base64url>` 能把数据直接塞进链接，好处是不用配任何存储。
-但 Cloudflare 对**请求 URL 长度限制约 16 KB**，base64 还要再涨 1/3 —— **整本书塞不下**，
-只适合几十段的演示数据。要在手机上看整本，请用上面的 KV / 文件方式。
+再拖一本进去就是换书（覆盖旧的）。
 
 ### 批注怎么存回来
 
-共读页里写的 🟡 你的 / 🔵 助手的批注存在浏览器本地（localStorage），点「⬇ 下载批注」导出 `coread-notes.json`。
-把它放回书目录重跑导出，批注就并进 `coread.json`：
+批注存在浏览器本地（localStorage），页尾 **「⬇ 下载批注」** 导出 `coread-notes.json`；
+放进书目录重跑一次导出，批注就并进 `coread.json`，再上传一次即可跨设备可见。
 
 ```bash
 python tools/coread-export.py ./weread-data/books/你的书 coread.json
-# 再按上面的方式上传一次，换台设备打开就能看到
 ```
 
-未提供共读数据时，看板为**单页书架模式**（共读 Tab 显示占位）。
+> 还有条冷门路：`/dashboard?token=xxx&coread=<base64url>`（`coread-export.py --b64` 的输出）。
+> Cloudflare 对请求 URL 限制约 16 KB，**只够几十段的演示数据**，整本书请用上面的方式。
+
+未提供共读数据时，看板为**单页书架模式**（共读 Tab 显示导入入口）。
 
 
 > ⚠️ 看板含你的**真实划线 / 想法 / 批注**，务必带 `token` 打开，不要把带 token 的链接外发。

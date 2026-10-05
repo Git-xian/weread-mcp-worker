@@ -157,24 +157,23 @@ curl -sS -X POST https://你的域名/mcp \
 ## 看板与共读（可选）
 
 服务自带一个看板：`https://你的域名/dashboard?token=你的MCP_AUTH_TOKEN`，双 Tab（**📖 共读** / **📚 书架与笔记**）。
-书架 Tab 开箱即用；共读 Tab 需要**把 EPUB 拆段后传上去**（网关不提供正文，所以要本地生成）。
+书架 Tab 开箱即用。
 
-在你的电脑上（有 EPUB 的那台）先跑两步：
+共读 Tab 需要导入一本原书（网关不提供正文，所以正文得来自 EPUB）：
+
+> 打开看板 → **📖 共读** → **把 EPUB 拖进去**。拆段在你的浏览器里本地完成，只把结果存到服务器，
+> 默认落在 `server/coread.json`（Docker 版是 `deploy/data/coread.json`，已挂卷、重建不丢）。
+
+不想用浏览器，就在有 EPUB 的那台机器上跑一条命令：
 
 ```bash
-# 1) EPUB → segments.db + book.json
-python tools/epub-split.py 你的书.epub ./weread-data/books/你的书
-
-# 2) 导出看板要吃的 coread.json
-python tools/coread-export.py ./weread-data/books/你的书 coread.json
+python tools/coread-upload.py 你的书.epub --url https://你的域名 --token 你的MCP_AUTH_TOKEN
 ```
 
-再把文件放到服务器上并指个路径：
+> 想换落点：`.env` 里设 `COREAD_FILE=/你的/路径.json`（Docker 版要在 `deploy/.env` 里设，并确保该目录已挂进容器）。
+> 批注存在浏览器本地，页尾「⬇ 下载批注」导出 `coread-notes.json`；放进书目录重跑 `tools/coread-export.py` 再上传一次即可跨设备可见。
 
-- **Docker 方式**：存成 `deploy/data/coread.json`，`.env` 里加 `COREAD_FILE=/data/coread.json`，再 `docker compose up -d`。
-- **systemd 方式**：`scp coread.json /opt/weread-mcp/coread.json`，`.env` 里加 `COREAD_FILE=/opt/weread-mcp/coread.json`，`sudo systemctl restart weread-mcp`。
-
-> 换书或更新批注：重新导出、覆盖同一个文件、重启服务即可。看板里的批注在浏览器本地，「⬇ 下载批注」导出 `coread-notes.json`，放进书目录重跑导出就能并回 `coread.json`。
+---
 
 ---
 

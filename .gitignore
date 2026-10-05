@@ -9,3 +9,8 @@ dist/
 preview/
 __pycache__/
 *.pyc
+
+# 共读数据（含书正文与批注，绝不入库）
+coread.json
+coread-notes.json
+deploy/data/

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import express from "express";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -235,10 +237,52 @@ function createServer() {
 // HTTP（Streamable HTTP 传输 + 可选 Bearer 鉴权）
 // ---------------------------------------------------------------------------
 const app = express();
+
+// ---------------------------------------------------------------------------
+// 共读数据上传：POST /coread（Bearer 鉴权）→ 落成本地文件；GET /coread 查状态
+// 必须注册在全局 express.json 之前，才能给这条路单独放宽 body 上限（整本书好几 MB）
+// ---------------------------------------------------------------------------
+const COREAD_PATH =
+  process.env.COREAD_FILE ||
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "coread.json");
+
+const authOk = (req) => {
+  const h = req.headers.authorization || "";
+  return !!AUTH_TOKEN && h.startsWith("Bearer ") && h.slice(7) === AUTH_TOKEN;
+};
+
+app.post("/coread", express.json({ limit: "32mb" }), (req, res) => {
+  if (!authOk(req)) {
+    return res.status(401).json({ error: "unauthorized", hint: "带上 Authorization: Bearer <MCP_AUTH_TOKEN>" });
+  }
+  const data = req.body;
+  if (!data || !Array.isArray(data.segments)) {
+    return res.status(400).json({ error: "结构不对：需要 { meta:{book,totalSegments}, segments:[{id,ch,chTitle,text,user,ai}] }" });
+  }
+  const raw = JSON.stringify(data);
+  try {
+    fs.mkdirSync(path.dirname(COREAD_PATH), { recursive: true });
+    fs.writeFileSync(COREAD_PATH, raw);
+  } catch (e) {
+    return res.status(500).json({ error: "写入失败：" + e.message, path: COREAD_PATH });
+  }
+  console.log(`[weread-mcp] 已保存共读数据 → ${COREAD_PATH}（${data.segments.length} 段）`);
+  res.json({ ok: true, key: "coread", path: COREAD_PATH, book: data.meta?.book ?? null, segments: data.segments.length, bytes: raw.length });
+});
+
+app.get("/coread", (req, res) => {
+  if (!authOk(req) && String(req.query.token || "") !== AUTH_TOKEN) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const data = readJson(COREAD_PATH);
+  if (!data) return res.json({ uploaded: false, path: COREAD_PATH });
+  res.json({ uploaded: true, path: COREAD_PATH, book: data.meta?.book ?? null, segments: data.segments?.length ?? 0 });
+});
+
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/healthz", (_req, res) =>
-  res.json({ ok: true, name: "weread-mcp-server", dashboard: "/dashboard" })
+  res.json({ ok: true, name: "weread-mcp-server", dashboard: "/dashboard", coread: "/coread" })
 );
 
 // ---------------------------------------------------------------------------
@@ -258,8 +302,8 @@ app.get("/dashboard", async (req, res) => {
     }
   }
   const maxBooks = Math.max(1, Math.min(20, parseInt(req.query.books, 10) || 12));
-  // 共读数据（可选）：?coread=<本地 JSON 路径 或 base64url>，或环境变量 COREAD_FILE
-  const coread = loadCoread(req.query.coread) || (process.env.COREAD_FILE ? readJson(process.env.COREAD_FILE) : null);
+  // 共读数据（可选）：?coread=<本地 JSON 路径 或 base64url>，或 COREAD_FILE / 上传落盘的那份
+  const coread = loadCoread(req.query.coread) || readJson(COREAD_PATH);
   try {
     const page = await buildDashboard((n, p) => callGateway(n, p), { maxBooks, coread });
     res.type("html").send(page);
