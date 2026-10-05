@@ -272,12 +272,41 @@ async function handleDashboard(request, env, url) {
   }
 
   const maxBooks = clampInt(url.searchParams.get("books"), 1, 20, 12);
+
+  // 共读数据（可选）：优先 KV 绑定 COREAD_KV 的 "coread" 键，其次 URL 内联 base64url。
+  // 结构与原版一致：{ meta:{book,totalSegments}, segments:[{id,ch,chTitle,text,user,ai}] }
+  let coread = null;
   try {
-    const page = await buildDashboard((n, p) => callGateway(n, p, env), { maxBooks });
+    if (env.COREAD_KV) coread = await env.COREAD_KV.get("coread", "json");
+  } catch {
+    /* KV 未绑定或读取失败：忽略 */
+  }
+  if (!coread) {
+    const inline = url.searchParams.get("coread");
+    if (inline) {
+      try {
+        coread = b64urlJson(inline);
+      } catch {
+        /* 非法内联数据：忽略，退回无共读 */
+      }
+    }
+  }
+
+  try {
+    const page = await buildDashboard((n, p) => callGateway(n, p, env), { maxBooks, coread });
     return html(page);
   } catch (e) {
     return html(`<h1>看板生成失败</h1><pre>${String(e.message ?? e)}</pre>`, 500);
   }
+}
+
+// base64url → JSON（UTF-8 安全）
+function b64urlJson(s) {
+  const b64 = String(s).replace(/-/g, "+").replace(/_/g, "/");
+  const pad = b64.length % 4 ? "=".repeat(4 - (b64.length % 4)) : "";
+  const bin = atob(b64 + pad);
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes));
 }
 
 export default {

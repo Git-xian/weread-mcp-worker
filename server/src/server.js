@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import express from "express";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -257,13 +258,37 @@ app.get("/dashboard", async (req, res) => {
     }
   }
   const maxBooks = Math.max(1, Math.min(20, parseInt(req.query.books, 10) || 12));
+  // 共读数据（可选）：?coread=<本地 JSON 路径 或 base64url>，或环境变量 COREAD_FILE
+  const coread = loadCoread(req.query.coread) || (process.env.COREAD_FILE ? readJson(process.env.COREAD_FILE) : null);
   try {
-    const page = await buildDashboard((n, p) => callGateway(n, p), { maxBooks });
+    const page = await buildDashboard((n, p) => callGateway(n, p), { maxBooks, coread });
     res.type("html").send(page);
   } catch (e) {
     res.status(500).type("html").send(`<h1>看板生成失败</h1><pre>${String(e.message ?? e)}</pre>`);
   }
 });
+
+function readJson(p) {
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// 支持两种写法：文件路径，或内联 base64url（与 Worker 版一致）
+function loadCoread(v) {
+  if (!v) return null;
+  const s = String(v);
+  if (fs.existsSync(s)) return readJson(s);
+  try {
+    const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = b64.length % 4 ? "=".repeat(4 - (b64.length % 4)) : "";
+    return JSON.parse(Buffer.from(b64 + pad, "base64").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
 
 app.use("/mcp", (req, res, next) => {
   if (!AUTH_TOKEN) return next();

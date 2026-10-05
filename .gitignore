@@ -6,3 +6,6 @@ node_modules/
 .wrangler/
 dist/
 *.log
+preview/
+__pycache__/
+*.pyc

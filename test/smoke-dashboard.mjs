@@ -35,9 +35,13 @@ if (key) {
   console.log("带 token ->", r.status, "|", r.ct, "|", Math.round(r.text.length / 1024), "KB");
   const checks = {
     "标题「共读看板」": r.text.includes("共读看板"),
-    "KPI「书架藏书」": r.text.includes("书架藏书"),
-    "热力图面板": r.text.includes("阅读热力图"),
-    "AI 批注区": r.text.includes("AI 批注区"),
+    "双 Tab 容器": r.text.includes('class="tabs"'),
+    "📖 共读 Tab": r.text.includes('id="tab-coread"'),
+    "📚 书架 Tab": r.text.includes('id="tab-shelf"'),
+    "共读页 / 书架页": r.text.includes('id="page-coread"') && r.text.includes('id="page-shelf"'),
+    "书脊色条书卡": r.text.includes("bc-spine"),
+    "汇总行": r.text.includes('class="sum-line"'),
+    "助手批注区": r.text.includes("助手批注区"),
     "搜索框": r.text.includes('class="search"'),
     "是完整 HTML": r.text.startsWith("<!DOCTYPE html>"),
   };

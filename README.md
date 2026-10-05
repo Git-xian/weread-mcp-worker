@@ -14,7 +14,7 @@
 > ⚠️ 两份代码**不通用**：Workers 版是 fetch handler，只能在 Cloudflare 跑；VPS/本机请用 `server/`。
 
 - 传输：MCP **Streamable HTTP**（无状态），端点固定 `/mcp`
-- **看板**：内置 `GET /dashboard`，实时把你的划线 / 想法 / 阅读热力图渲染成一个自包含网页，手机浏览器直接打开
+- **看板**：内置 `GET /dashboard`，双 Tab（**📖 共读** + **📚 书架与笔记**），结构与桌面版 `weread_dashboard.py` 一致，手机浏览器直接打开
 - 存储：MCP 端点**不需要数据库**，只有你的 `wrk-` key 放在服务端
 - 工具：14 个，覆盖搜索 / 书架 / 笔记 / 阅读统计 / 点评 / 推荐
 
@@ -26,12 +26,14 @@
 ├── LICENSE         # MIT
 ├── src/            # Cloudflare Workers 版（wrangler 入口）
 │   ├── index.js    #   MCP 服务 + /dashboard 路由
-│   └── dashboard.js #  看板渲染（两种形态共用同一份）
+│   └── dashboard.js #  看板渲染（两种形态共用；结构与原版 weread_dashboard.py 一致）
 ├── wrangler.toml   #   └ Workers 配置
 ├── server/         # Node 版（Express + Streamable HTTP）—— VPS / 本机用
 │   ├── src/        #   服务 + 网关客户端 + dashboard.js
 │   ├── Dockerfile
 │   └── .env.example
+├── tools/
+│   └── coread-export.py   # 把 EPUB 共读库（book.json/segments.db）导出成 coread.json
 ├── deploy/         # VPS 部署配置
 │   ├── docker-compose.yml   # app + Caddy（自动 HTTPS）
 │   ├── Caddyfile
@@ -167,9 +169,9 @@ npm run start:env
 
 ---
 
-# 看板（共读书架）
+# 看板（共读 + 书架）
 
-除了 MCP 工具，服务还内置一个**看板页面**：把书架、划线、想法、阅读热力图实时渲染成一个自包含 HTML，**浏览器直接打开**，无需 App。
+除了 MCP 工具，服务还内置一个**看板页面**（`GET /dashboard`），结构与桌面版 `weread_dashboard.py` **完全一致**：顶部双 Tab —— **📖 共读** / **📚 书架与笔记**。
 
 - 端点：`GET /dashboard`
 - 口令：`?token=<你的 MCP_AUTH_TOKEN>`（与 MCP 同一个口令）
@@ -179,11 +181,34 @@ npm run start:env
 https://<你的地址>/dashboard?token=<MCP_AUTH_TOKEN>
 ```
 
-页面内容：KPI 总览（藏书 / 有笔记的书 / 划线数 / 想法数 / 累计阅读）· 阅读热力图 · 最常读的书 · 按书展开的划线 🟡 与想法 💭 · 顶部搜索框（书名 / 作者 / 正文，输入即过滤）· 每条下方预留 🔵 AI 批注位。
+**📚 书架与笔记**（数据实时来自官方网关）
+汇总行 + 搜索框 + **书脊色条书卡**；点书名展开该书的划线 🟡 / 想法 💭，每条下方预留 🔵 助手批注位。
 
-> ⚠️ 看板含你的**真实划线与想法**，务必带 `token` 打开，不要把带 token 的链接外发。
+**📖 共读**（需注入共读数据，见下）
+原版书**逐段对照**，点任意段落 → 写 🟡你的 / 🔵助手的批注；本机自动暂存，可「下载批注」导出 JSON。
+
+## 共读数据怎么来
+
+共读页需要 EPUB 拆段数据（网关不提供正文）。用本地脚本把 EPUB 拆好，再导出成看板能吃的 JSON：
+
+```bash
+# 1) 拆 EPUB（epub_split.py，来自原项目）
+python epub_split.py 你的书.epub --out ./weread-data/books/你的书
+
+# 2) 导出成 coread.json（含已有批注）
+python tools/coread-export.py ./weread-data/books/你的书 coread.json --b64
+
+# 3) 注入看板（三选一）
+#    a. Node 版：环境变量 COREAD_FILE=coread.json
+#    b. URL 内联：/dashboard?token=xxx&coread=<上面 --b64 的输出>
+#    c. Cloudflare：把 coread.json 存进 KV 绑定的 "coread" 键
+```
+
+未提供共读数据时，看板为**单页书架模式**（共读 Tab 显示占位）。
+
+> ⚠️ 看板含你的**真实划线 / 想法 / 批注**，务必带 `token` 打开，不要把带 token 的链接外发。
 >
-> 📌 **子请求预算**：看板每本书要拉 2 次网关（划线 + 想法）。Cloudflare Workers **免费版单请求上限 50 个子请求** → `books` 别调太大（默认 12 约 27 个子请求，安全）；书特别多时绑付费版或加 KV 缓存。
+> 📌 **子请求预算**：书架页每本书要拉 2 次网关（划线 + 想法）。Cloudflare Workers **免费版单请求上限 50 个子请求** → `books` 别调太大（默认 12 约 27 个子请求，安全）；书特别多时绑付费版或加 KV 缓存。
 
 ---
 
