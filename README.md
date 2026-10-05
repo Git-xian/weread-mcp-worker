@@ -14,7 +14,8 @@
 > ⚠️ 两份代码**不通用**：Workers 版是 fetch handler，只能在 Cloudflare 跑；VPS/本机请用 `server/`。
 
 - 传输：MCP **Streamable HTTP**（无状态），端点固定 `/mcp`
-- 存储：**不需要数据库**，只有你的 `wrk-` key 放在服务端
+- **看板**：内置 `GET /dashboard`，实时把你的划线 / 想法 / 阅读热力图渲染成一个自包含网页，手机浏览器直接打开
+- 存储：MCP 端点**不需要数据库**，只有你的 `wrk-` key 放在服务端
 - 工具：14 个，覆盖搜索 / 书架 / 笔记 / 阅读统计 / 点评 / 推荐
 
 ---
@@ -22,10 +23,13 @@
 ## 仓库结构
 
 ```
+├── LICENSE         # MIT
 ├── src/            # Cloudflare Workers 版（wrangler 入口）
+│   ├── index.js    #   MCP 服务 + /dashboard 路由
+│   └── dashboard.js #  看板渲染（两种形态共用同一份）
 ├── wrangler.toml   #   └ Workers 配置
 ├── server/         # Node 版（Express + Streamable HTTP）—— VPS / 本机用
-│   ├── src/        #   服务与网关客户端
+│   ├── src/        #   服务 + 网关客户端 + dashboard.js
 │   ├── Dockerfile
 │   └── .env.example
 ├── deploy/         # VPS 部署配置
@@ -163,6 +167,26 @@ npm run start:env
 
 ---
 
+# 看板（共读书架）
+
+除了 MCP 工具，服务还内置一个**看板页面**：把书架、划线、想法、阅读热力图实时渲染成一个自包含 HTML，**浏览器直接打开**，无需 App。
+
+- 端点：`GET /dashboard`
+- 口令：`?token=<你的 MCP_AUTH_TOKEN>`（与 MCP 同一个口令）
+- 可选：`?books=<1..20>`，最多渲染多少本有笔记的书（默认 12）
+
+```
+https://<你的地址>/dashboard?token=<MCP_AUTH_TOKEN>
+```
+
+页面内容：KPI 总览（藏书 / 有笔记的书 / 划线数 / 想法数 / 累计阅读）· 阅读热力图 · 最常读的书 · 按书展开的划线 🟡 与想法 💭 · 顶部搜索框（书名 / 作者 / 正文，输入即过滤）· 每条下方预留 🔵 AI 批注位。
+
+> ⚠️ 看板含你的**真实划线与想法**，务必带 `token` 打开，不要把带 token 的链接外发。
+>
+> 📌 **子请求预算**：看板每本书要拉 2 次网关（划线 + 想法）。Cloudflare Workers **免费版单请求上限 50 个子请求** → `books` 别调太大（默认 12 约 27 个子请求，安全）；书特别多时绑付费版或加 KV 缓存。
+
+---
+
 # 安全边界
 
 - `WEREAD_API_KEY` 只存在于服务端（Worker Secret / 服务器 `.env`），不进代码、不进日志、不进任何回包。
@@ -170,3 +194,24 @@ npm run start:env
 - 本服务只做**读**类转发，不落地任何数据；共读批注等私有数据仍留在你本机。
 - Node 版部署时，应用只监听 `127.0.0.1:8787`，公网仅暴露 443（见 VPS 教程「安全清单」）。
 - `skill_version` 固定为 `1.0.4`；若官方网关返回 `upgrade_info`，按提示更新 `src/weread.js`（Worker）或 `server/src/weread.js` 顶部的 `SKILL_VERSION`。
+
+---
+
+# 参考与致谢
+
+本项目的共读形态与看板设计，站在这些开源项目与官方服务的肩膀上：
+
+| 来源 | 借鉴了什么 | 协议 |
+|------|-----------|------|
+| [Coread 共读室](https://github.com/meowmana/coread) | 核心设计：人与 AI 共享同一本书的页码、划线、批注并排显示 | MIT |
+| [Tasogare 黄昏](https://github.com/EnhydrInk/tasogare) | 双色划线意象：两种笔迹留在同一页 | MIT |
+| [awesome-weread](https://github.com/BENZEMA216/awesome-weread) | 官方 Skill 生态索引，接口清单据此整理 | CC0 |
+| [微信读书官方 Agent Skill](https://weread.qq.com/r/weread-skills) | 数据来源：官方网关与 API Key 机制 | 官方服务 |
+
+> 本仓库代码为原创实现，仅调用官方公开接口，未复制上述任何项目的源码。
+
+---
+
+# 开源协议
+
+[MIT](LICENSE) © 2026 weread-mcp-worker contributors

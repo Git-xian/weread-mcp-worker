@@ -8,6 +8,7 @@ import {
   isInitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { callGateway, prune } from "./weread.js";
+import { buildDashboard } from "./dashboard.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -235,7 +236,34 @@ function createServer() {
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-app.get("/healthz", (_req, res) => res.json({ ok: true, name: "weread-mcp-server" }));
+app.get("/healthz", (_req, res) =>
+  res.json({ ok: true, name: "weread-mcp-server", dashboard: "/dashboard" })
+);
+
+// ---------------------------------------------------------------------------
+// 看板：GET /dashboard?token=<MCP_AUTH_TOKEN>&books=<1..20>
+// 实时拉官方网关数据，渲染成自包含 HTML。手机/电脑浏览器直接打开即可。
+// ---------------------------------------------------------------------------
+app.get("/dashboard", async (req, res) => {
+  if (AUTH_TOKEN) {
+    const t =
+      String(req.query.token || "") ||
+      (req.headers.authorization || "").replace(/^Bearer /, "");
+    if (t !== AUTH_TOKEN) {
+      return res
+        .status(403)
+        .type("html")
+        .send("<h1>403 需要访问口令</h1><p>请在地址后加上 <code>?token=你的MCP_AUTH_TOKEN</code> 再打开。</p>");
+    }
+  }
+  const maxBooks = Math.max(1, Math.min(20, parseInt(req.query.books, 10) || 12));
+  try {
+    const page = await buildDashboard((n, p) => callGateway(n, p), { maxBooks });
+    res.type("html").send(page);
+  } catch (e) {
+    res.status(500).type("html").send(`<h1>看板生成失败</h1><pre>${String(e.message ?? e)}</pre>`);
+  }
+});
 
 app.use("/mcp", (req, res, next) => {
   if (!AUTH_TOKEN) return next();

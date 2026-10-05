@@ -5,6 +5,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { callGateway } from "./weread.js";
+import { buildDashboard } from "./dashboard.js";
 
 // ---------------------------------------------------------------------------
 // 工具定义：每个 tool 薄封装一个微信读书官方网关接口。
@@ -236,13 +237,59 @@ function withCors(res) {
   return out;
 }
 
+function bearer(request) {
+  const a = request.headers.get("authorization") || "";
+  return a.startsWith("Bearer ") ? a.slice(7) : "";
+}
+
+function clampInt(v, lo, hi, dflt) {
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.max(lo, Math.min(hi, n));
+}
+
+function html(body, status = 200) {
+  return new Response(body, {
+    status,
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...CORS },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 看板：GET /dashboard?token=<MCP_AUTH_TOKEN>&books=<1..20>
+// 数据实时来自官方网关，渲染成一个自包含 HTML 页面（浏览器直接打开即可）。
+// ---------------------------------------------------------------------------
+async function handleDashboard(request, env, url) {
+  const token = url.searchParams.get("token") || bearer(request);
+  if (env.MCP_AUTH_TOKEN && token !== env.MCP_AUTH_TOKEN) {
+    return html(
+      "<h1>403 需要访问口令</h1><p>请在地址后加上 <code>?token=你的MCP_AUTH_TOKEN</code> 再打开。</p>",
+      403
+    );
+  }
+  if (!env.WEREAD_API_KEY) {
+    return html("<h1>500 未配置密钥</h1><p>请先设置 Worker Secret <code>WEREAD_API_KEY</code>。</p>", 500);
+  }
+
+  const maxBooks = clampInt(url.searchParams.get("books"), 1, 20, 12);
+  try {
+    const page = await buildDashboard((n, p) => callGateway(n, p, env), { maxBooks });
+    return html(page);
+  } catch (e) {
+    return html(`<h1>看板生成失败</h1><pre>${String(e.message ?? e)}</pre>`, 500);
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
     if (url.pathname === "/" || url.pathname === "/healthz") {
-      return json({ ok: true, name: "weread-mcp", endpoint: "/mcp" });
+      return json({ ok: true, name: "weread-mcp", endpoint: "/mcp", dashboard: "/dashboard" });
+    }
+    if (url.pathname === "/dashboard" || url.pathname === "/dashboard/") {
+      return handleDashboard(request, env, url);
     }
     if (url.pathname !== "/mcp") return json({ error: "not found" }, 404);
 
