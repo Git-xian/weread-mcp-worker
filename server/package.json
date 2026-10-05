@@ -1,0 +1,19 @@
+{
+  "name": "weread-mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "微信读书 · 远程 MCP 服务端（Node/Express + Streamable HTTP）— 供 VPS 或本机部署",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "start:env": "node --env-file-if-exists=.env src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "express": "^5.2.1"
+  }
+}

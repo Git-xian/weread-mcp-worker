@@ -1,0 +1,43 @@
+# 微信读书远程 MCP · VPS 一键部署（Docker Compose + Caddy 自动 HTTPS）
+#
+# 用法：
+#   1) cp .env.example .env  并填好（域名 / key / 口令）
+#   2) docker compose up -d --build
+#   3) 手机端填 https://<你的域名>/mcp
+
+name: weread-mcp
+
+services:
+  app:
+    build: ../server
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8787"
+    expose:
+      - "8787"
+    networks: [weread]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      MCP_DOMAIN: ${MCP_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    networks: [weread]
+
+networks:
+  weread:
+
+volumes:
+  caddy_data:
+  caddy_config:

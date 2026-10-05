@@ -1,0 +1,26 @@
+# 微信读书远程 MCP · systemd 服务（不用 Docker 时使用）
+#
+# 1) 把 server/ 放到 /opt/weread-mcp/server，并在其中 npm install --omit=dev
+# 2) 在 /opt/weread-mcp/server/.env 写好 WEREAD_API_KEY / MCP_AUTH_TOKEN
+# 3) sudo cp weread-mcp.service /etc/systemd/system/
+# 4) 改下面的 User 和 ExecStart 里的 node 绝对路径（which node）
+# 5) sudo systemctl daemon-reload && sudo systemctl enable --now weread-mcp
+
+[Unit]
+Description=WeRead Remote MCP Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/weread-mcp/server
+EnvironmentFile=/opt/weread-mcp/server/.env
+ExecStart=/usr/bin/node src/server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

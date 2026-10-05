@@ -1,0 +1,8 @@
+name = "weread-mcp"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+# 密钥不写在这里，用 wrangler secret put 存：
+#   wrangler secret put WEREAD_API_KEY     # 微信读书 wrk- 开头的 key
+#   wrangler secret put MCP_AUTH_TOKEN     # 你自己给手机端约定的访问口令（可自定义一串随机字符）

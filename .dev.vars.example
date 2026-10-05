@@ -1,0 +1,4 @@
+# 本地开发用（wrangler dev 会自动读取本文件；线上用 wrangler secret put 设置）
+# 复制本文件为 .dev.vars 再填真实值。.dev.vars 已在 .gitignore 中，不会入库。
+WEREAD_API_KEY=wrk-你的key
+MCP_AUTH_TOKEN=换成一串你自己的随机口令

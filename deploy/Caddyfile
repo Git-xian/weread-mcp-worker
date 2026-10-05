@@ -1,0 +1,6 @@
+# 域名从 .env 的 MCP_DOMAIN 注入（compose 会替换 {$MCP_DOMAIN}）
+# 证书由 Caddy 自动申请/续期（Let's Encrypt），前提是域名 A 记录已指向本机且 80/443 放行。
+{$MCP_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:8787
+}
