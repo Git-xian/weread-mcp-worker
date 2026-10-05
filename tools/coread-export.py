@@ -11,11 +11,17 @@ coread-export.py — 把 epub_split.py 拆出来的共读库，导出成远程�
 用法：
   python coread-export.py <共读库目录> [输出 coread.json] [--b64]
 
-  --b64   额外打印 base64url 编码（可直接拼到 /dashboard?coread=<b64>）
+  --b64   额外打印 base64url 编码（只适合几十段的小样本，见下）
 
-远程看板加载方式：
-  · Cloudflare / Node：把 coread.json 放进 KV（键 coread）或 serve 的目录，
-    然后用 ?coread=<路径|b64> 传入；Node 版也可设环境变量 COREAD_FILE。
+产物结构：
+  { "meta": { "book": 书名, "totalSegments": N },
+    "segments": [ { "id", "ch", "chTitle", "text", "user", "ai" } ] }
+
+传到看板的方式：
+  · Cloudflare Workers：POST /coread（body 为本文件），存进 KV 的 "coread" 键；
+    也可 npx wrangler kv key put coread --path coread.json --binding COREAD_KV --remote
+  · VPS / 自己电脑：把文件放服务器上，设环境变量 COREAD_FILE=<路径>
+  · 小样本临时看：?coread=<base64url>（URL 长度有限，整本书塞不下）
 """
 import base64
 import json

@@ -6,3 +6,21 @@ compatibility_flags = ["nodejs_compat"]
 # 密钥不写在这里，用 wrangler secret put 存：
 #   wrangler secret put WEREAD_API_KEY     # 微信读书 wrk- 开头的 key
 #   wrangler secret put MCP_AUTH_TOKEN     # 你自己给手机端约定的访问口令（可自定义一串随机字符）
+
+# ---------------------------------------------------------------------------
+# 共读数据（可选）：不配也能跑，只是看板「📖 共读」Tab 为空。
+# 配了才有原书逐段对照。整本书的 coread.json 通常 0.3–3 MB，放 KV 正合适。
+#
+#   1) 建库（拿到 id）：
+#        npx wrangler kv namespace create COREAD_KV
+#   2) 把打印出来的 id 填到下面，去掉这几行的注释
+#   3) 上传 coread.json（--remote 才是传到线上，不加只写本地）：
+#        npx wrangler kv key put coread --path coread.json --binding COREAD_KV --remote
+#   4) 重新部署：npx wrangler deploy
+#
+# 不想用命令行：部署后在 Cloudflare 后台建 KV → 给 Worker 加变量名
+# COREAD_KV 的绑定 → 在 KV 编辑器里粘贴 JSON；或直接 POST 到 /coread（见 README）。
+# ---------------------------------------------------------------------------
+# [[kv_namespaces]]
+# binding = "COREAD_KV"
+# id = "<粘贴 npx wrangler kv namespace create 返回的 id>"

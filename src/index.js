@@ -300,6 +300,74 @@ async function handleDashboard(request, env, url) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 上传共读数据：POST /coread  （body = coread.json 原文，或 base64url）
+// 受 MCP_AUTH_TOKEN 保护，写入 KV 绑定的 "coread" 键。
+//   curl -X POST "https://<你的地址>/coread" \
+//        -H "Authorization: Bearer <MCP_AUTH_TOKEN>" \
+//        -H "Content-Type: application/json" \
+//        --data-binary @coread.json
+// ---------------------------------------------------------------------------
+const COREAD_MAX = 24 * 1024 * 1024; // KV 单值上限 25 MiB，留点余量
+
+async function handleCoreadUpload(request, env, url) {
+  const token = bearer(request) || url.searchParams.get("token") || "";
+  if (!env.MCP_AUTH_TOKEN || token !== env.MCP_AUTH_TOKEN) {
+    return json({ error: "unauthorized", hint: "带上 Authorization: Bearer <MCP_AUTH_TOKEN>" }, 401);
+  }
+  if (!env.COREAD_KV) {
+    return json(
+      {
+        error: "COREAD_KV 未绑定",
+        hint: "在 wrangler.toml 里加 [[kv_namespaces]] binding=\"COREAD_KV\" 并重新部署，或在 Cloudflare 后台给 Worker 加 KV 绑定。",
+      },
+      400
+    );
+  }
+
+  const raw = await request.text();
+  if (!raw.trim()) return json({ error: "空 body：请把 coread.json 的内容作为请求体" }, 400);
+  if (raw.length > COREAD_MAX) {
+    return json({ error: `太大：${raw.length} 字节，KV 单值上限 25 MiB` }, 413);
+  }
+
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    try {
+      data = b64urlJson(raw.trim());
+    } catch {
+      return json({ error: "body 既不是 JSON 也不是 base64url" }, 400);
+    }
+  }
+  if (!data || !Array.isArray(data.segments)) {
+    return json({ error: "结构不对：需要 { meta:{book,totalSegments}, segments:[{id,ch,chTitle,text,user,ai}] }" }, 400);
+  }
+
+  await env.COREAD_KV.put("coread", JSON.stringify(data));
+  return json({
+    ok: true,
+    key: "coread",
+    book: data.meta?.book ?? null,
+    segments: data.segments.length,
+    bytes: raw.length,
+    view: "/dashboard?token=<MCP_AUTH_TOKEN>",
+  });
+}
+
+// 查看已上传的共读数据（只回摘要，不回正文）
+async function handleCoreadStatus(request, env, url) {
+  const token = bearer(request) || url.searchParams.get("token") || "";
+  if (!env.MCP_AUTH_TOKEN || token !== env.MCP_AUTH_TOKEN) {
+    return json({ error: "unauthorized" }, 401);
+  }
+  if (!env.COREAD_KV) return json({ bound: false, uploaded: false, hint: "COREAD_KV 未绑定" });
+  const data = await env.COREAD_KV.get("coread", "json");
+  if (!data) return json({ bound: true, uploaded: false });
+  return json({ bound: true, uploaded: true, book: data.meta?.book ?? null, segments: data.segments?.length ?? 0 });
+}
+
 // base64url → JSON（UTF-8 安全）
 function b64urlJson(s) {
   const b64 = String(s).replace(/-/g, "+").replace(/_/g, "/");
@@ -315,10 +383,15 @@ export default {
 
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
     if (url.pathname === "/" || url.pathname === "/healthz") {
-      return json({ ok: true, name: "weread-mcp", endpoint: "/mcp", dashboard: "/dashboard" });
+      return json({ ok: true, name: "weread-mcp", endpoint: "/mcp", dashboard: "/dashboard", coread: "/coread" });
     }
     if (url.pathname === "/dashboard" || url.pathname === "/dashboard/") {
       return handleDashboard(request, env, url);
+    }
+    if (url.pathname === "/coread" || url.pathname === "/coread/") {
+      if (request.method === "POST") return handleCoreadUpload(request, env, url);
+      if (request.method === "GET") return handleCoreadStatus(request, env, url);
+      return json({ error: "method not allowed" }, 405);
     }
     if (url.pathname !== "/mcp") return json({ error: "not found" }, 404);
 
