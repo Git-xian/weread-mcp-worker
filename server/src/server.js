@@ -200,6 +200,107 @@ const TOOLS = [
     },
     handler: (a) => callGateway(a.api_name, a.params || {}),
   },
+
+  // -------------------------------------------------------------------------
+  // 共读原文与批注（数据在服务器本地文件，与微信读书网关无关）
+  // -------------------------------------------------------------------------
+  {
+    name: "coread_outline",
+    description: "【共读书目】列出服务器上共读书目的章节目录（章节标题 + 起止段号）。先看结构，再决定读哪几段。",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => {
+      const coread = getCoread();
+      const meta = coread.meta || {};
+      return {
+        book: meta.book ?? null,
+        totalSegments: meta.totalSegments ?? coread.segments.length,
+        chapters: meta.chapters || [],
+      };
+    },
+  },
+  {
+    name: "coread_read",
+    description:
+      "【共读书目】按段落范围读原书正文。from/to 为段号（含两端，从 1 开始）；单次最多 60 段，超了会截断并在 nextFrom 给出续读起点。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        from: { type: "integer", description: "起始段号（含），默认 1" },
+        to: { type: "integer", description: "结束段号（含），默认按 limit 推算" },
+        limit: { type: "integer", description: "最多返回多少段，默认 40，上限 60" },
+      },
+    },
+    handler: async (a) => {
+      const coread = getCoread();
+      const total = coread.meta?.totalSegments ?? coread.segments.length;
+      const from = Math.max(1, a.from ?? 1);
+      const limit = Math.max(1, Math.min(60, a.limit ?? 40));
+      const to = Math.min(total, a.to ?? from + limit - 1);
+      const segs = coread.segments.filter((s) => s.id >= from && s.id <= to).slice(0, limit);
+      const last = segs.length ? segs[segs.length - 1].id : from - 1;
+      return {
+        book: coread.meta?.book ?? null,
+        totalSegments: total,
+        from: segs.length ? segs[0].id : null,
+        to: last,
+        truncated: last < to,
+        nextFrom: last < total ? last + 1 : null,
+        segments: segs.map((s) => ({ id: s.id, chTitle: s.chTitle || "", text: s.text })),
+      };
+    },
+  },
+  {
+    name: "coread_search",
+    description:
+      "【共读书目】在共读书目正文里做关键词搜索（纯本地，不走微信读书网关）。返回命中段落，含完整正文 text 与上下文片段 snippet。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        q: { type: "string", description: "关键词" },
+        limit: { type: "integer", description: "最多返回多少段，默认 20，上限 100" },
+      },
+      required: ["q"],
+    },
+    handler: async (a) => {
+      const coread = getCoread();
+      const limit = Math.max(1, Math.min(100, a.limit ?? 20));
+      const hits = searchSegments(coread, a.q, limit);
+      return { book: coread.meta?.book ?? null, q: a.q, count: hits.length, hits };
+    },
+  },
+  {
+    name: "coread_annotate",
+    description:
+      "【共读书目】给指定段落写批注，直接落盘，看板立即可见。annotations 每项 { id, user?, ai? }：user=用户的思考，ai=助手的思考（这两栏就是看板上双色批注）；两栏都传空字符串表示删除该段批注。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        annotations: {
+          type: "array",
+          description: "要写入的批注列表",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "integer", description: "段号" },
+              user: { type: "string", description: "用户的思考（可省略）" },
+              ai: { type: "string", description: "助手的思考（可省略）" },
+            },
+            required: ["id"],
+          },
+        },
+      },
+      required: ["annotations"],
+    },
+    handler: async (a) => {
+      const list = Array.isArray(a.annotations) ? a.annotations : [];
+      if (!list.length) throw new Error("annotations 为空");
+      getCoread(); // 校验书已上传
+      const patch = {};
+      for (const it of list) patch[String(it.id)] = { user: it.user ?? "", ai: it.ai ?? "" };
+      const r = mergeNotes(patch);
+      return { ok: true, changed: r.changed, totalAnnotated: r.total, ids: Object.keys(patch) };
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -246,6 +347,61 @@ const COREAD_PATH =
   process.env.COREAD_FILE ||
   path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "coread.json");
 
+// 批注与原文分开存：AI 写批注时不必重写整本原文
+const NOTES_PATH =
+  process.env.COREAD_NOTES_FILE ||
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "coread-notes.json");
+
+function readNotes() {
+  return readJson(NOTES_PATH) || {};
+}
+function mergeNotes(patch) {
+  const cur = readNotes();
+  let changed = 0;
+  for (const [k, v] of Object.entries(patch || {})) {
+    if (!/^\d+$/.test(k)) continue;
+    const user = String(v?.user ?? "").trim();
+    const ai = String(v?.ai ?? "").trim();
+    if (!user && !ai) {
+      if (cur[k]) {
+        delete cur[k];
+        changed++;
+      }
+      continue;
+    }
+    const before = cur[k] || {};
+    if (before.user !== user || before.ai !== ai) changed++;
+    cur[k] = { user, ai, ts: v?.ts ?? Date.now() };
+  }
+  fs.mkdirSync(path.dirname(NOTES_PATH), { recursive: true });
+  fs.writeFileSync(NOTES_PATH, JSON.stringify(cur));
+  return { changed, total: Object.keys(cur).length };
+}
+function getCoread() {
+  const d = readJson(COREAD_PATH);
+  if (!d || !Array.isArray(d.segments)) {
+    throw new Error("服务器上还没有共读原书。先在看板（📖 共读 Tab）拖入 EPUB，或用 POST /coread 上传。");
+  }
+  return d;
+}
+function searchSegments(coread, q, limit) {
+  const kw = String(q || "").trim();
+  if (!kw) return [];
+  const lower = kw.toLowerCase();
+  const out = [];
+  for (const s of coread.segments) {
+    const t = String(s.text || "");
+    const i = t.toLowerCase().indexOf(lower);
+    if (i < 0) continue;
+    const from = Math.max(0, i - 30);
+    const snippet =
+      (from > 0 ? "…" : "") + t.slice(from, i + kw.length + 40) + (i + kw.length + 40 < t.length ? "…" : "");
+    out.push({ id: s.id, ch: s.ch, chTitle: s.chTitle || "", text: t, snippet });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 const authOk = (req) => {
   const h = req.headers.authorization || "";
   return !!AUTH_TOKEN && h.startsWith("Bearer ") && h.slice(7) === AUTH_TOKEN;
@@ -275,14 +431,59 @@ app.get("/coread", (req, res) => {
     return res.status(401).json({ error: "unauthorized" });
   }
   const data = readJson(COREAD_PATH);
-  if (!data) return res.json({ uploaded: false, path: COREAD_PATH });
-  res.json({ uploaded: true, path: COREAD_PATH, book: data.meta?.book ?? null, segments: data.segments?.length ?? 0 });
+  const annotated = Object.keys(readNotes()).length;
+  if (!data) return res.json({ uploaded: false, path: COREAD_PATH, annotated });
+  res.json({ uploaded: true, path: COREAD_PATH, book: data.meta?.book ?? null, segments: data.segments?.length ?? 0, annotated });
+});
+
+// ---------------------------------------------------------------------------
+// 共读批注：GET/POST /coread/notes（Bearer 或 ?token=）
+// 某段 user/ai 都传空字符串 = 删除该段批注
+// ---------------------------------------------------------------------------
+app.post("/coread/notes", express.json({ limit: "2mb" }), (req, res) => {
+  if (!authOk(req) && String(req.query.token || "") !== AUTH_TOKEN) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  let patch = req.body;
+  if (patch && typeof patch.notes === "object" && patch.notes) patch = patch.notes;
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+    return res.status(400).json({ error: '结构不对：需要 { "<段id>": { user, ai } }' });
+  }
+  const r = mergeNotes(patch);
+  res.json({ ok: true, changed: r.changed, total: r.total });
+});
+
+app.get("/coread/notes", (req, res) => {
+  if (!authOk(req) && String(req.query.token || "") !== AUTH_TOKEN) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const notes = readNotes();
+  res.json({ total: Object.keys(notes).length, notes });
+});
+
+// 原文搜索（看板搜索框与 AI 的 coread_search 共用）
+app.get("/coread/search", (req, res) => {
+  if (!authOk(req) && String(req.query.token || "") !== AUTH_TOKEN) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const coread = readJson(COREAD_PATH);
+  if (!coread || !Array.isArray(coread.segments)) return res.status(404).json({ error: "还没上传原书" });
+  const q = String(req.query.q || "");
+  const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 20));
+  const hits = searchSegments(coread, q, limit);
+  res.json({
+    book: coread.meta?.book ?? null,
+    totalSegments: coread.meta?.totalSegments ?? coread.segments.length,
+    q,
+    count: hits.length,
+    hits,
+  });
 });
 
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/healthz", (_req, res) =>
-  res.json({ ok: true, name: "weread-mcp-server", dashboard: "/dashboard", coread: "/coread" })
+  res.json({ ok: true, name: "weread-mcp-server", dashboard: "/dashboard", coread: "/coread", notes: "/coread/notes", search: "/coread/search" })
 );
 
 // ---------------------------------------------------------------------------
@@ -304,8 +505,9 @@ app.get("/dashboard", async (req, res) => {
   const maxBooks = Math.max(1, Math.min(20, parseInt(req.query.books, 10) || 12));
   // 共读数据（可选）：?coread=<本地 JSON 路径 或 base64url>，或 COREAD_FILE / 上传落盘的那份
   const coread = loadCoread(req.query.coread) || readJson(COREAD_PATH);
+  const notes = coread ? readNotes() : null;
   try {
-    const page = await buildDashboard((n, p) => callGateway(n, p), { maxBooks, coread });
+    const page = await buildDashboard((n, p) => callGateway(n, p), { maxBooks, coread, notes });
     res.type("html").send(page);
   } catch (e) {
     res.status(500).type("html").send(`<h1>看板生成失败</h1><pre>${String(e.message ?? e)}</pre>`);

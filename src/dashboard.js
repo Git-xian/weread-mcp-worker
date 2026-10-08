@@ -77,33 +77,81 @@ function spineColor(title) {
 // ---------------------------------------------------------------------------
 // 共读页（对齐原版 coread_html）
 // ---------------------------------------------------------------------------
-function coreadHtml(coread) {
+/**
+ * 共读页：**只渲染被划线/批注过的段落**（不再铺开整本原文）。
+ * 理由：原文只作为 AI 的阅读素材存在服务器（KV），人类看板聚焦「划线 + 双方思考」。
+ * 想给还没批注的段落写批注 → 用页内搜索定位。
+ *
+ *   coread = { meta:{book,totalSegments}, segments:[{id,ch,chTitle,text,user?,ai?}] }
+ *   notes  = { "<id>": {user, ai, ts} }   // KV 的 coread-notes，优先于段内自带的 user/ai
+ */
+function coreadHtml(coread, notes) {
   if (!coread || !Array.isArray(coread.segments) || !coread.segments.length) return "";
-  const chMap = {};
-  for (const s of coread.segments) (chMap[s.ch] ||= []).push(s);
+  const byId = new Map(coread.segments.map((s) => [String(s.id), s]));
+
+  // 批注合并：段落自带的 user/ai（兼容旧导出格式）打底，KV notes 覆盖
+  const ann = {};
+  for (const s of coread.segments) {
+    if (s.user || s.ai) ann[String(s.id)] = { user: s.user || "", ai: s.ai || "" };
+  }
+  for (const [k, n] of Object.entries(notes || {})) {
+    if (!n || (!n.user && !n.ai)) delete ann[k];
+    else ann[k] = { user: n.user || "", ai: n.ai || "" };
+  }
+
+  const ids = Object.keys(ann)
+    .filter((k) => byId.has(k))
+    .map(Number)
+    .sort((a, b) => a - b);
 
   const parts = [
     '<div class="panel" id="coread">',
-    '<h3 class="cr-head">📖 共读模式（原版书对照）<span class="cr-sub">点任意段落 → 写 🟡你的 / 🔵助手的批注</span></h3>',
+    '<h3 class="cr-head">📖 共读批注' +
+      `<span class="cr-sub">本页只显示<strong>被划线/批注</strong>的段落 · 共 <b>${ids.length}</b> 条 · 整本原文存在服务器（AI 可经 MCP 读取）</span></h3>`,
+    // 本机草稿未同步时的提示条（默认隐藏）
+    '<div class="sync-bar" id="sync-bar" hidden>⚠️ 本机有 <b id="sync-n">0</b> 条批注还没同步到服务器' +
+      '<button onclick="syncNow()">立即同步</button></div>',
+    // 搜索原文 → 给还没批注的段落写批注
+    '<div class="cr-search">' +
+      '<input id="cr-q" placeholder="搜索原文，找到想批注的段落…" onkeydown="if(event.key===\'Enter\')crSearch()">' +
+      '<button onclick="crSearch()">搜索</button></div>' +
+      '<div id="cr-hits"></div>',
+    '<div id="cr-list">',
   ];
-  for (const ci of Object.keys(chMap).sort((a, b) => a - b)) {
-    parts.push(`<h4 class="cth">${esc(chMap[ci][0]?.chTitle || "")}</h4>`);
-    for (const s of chMap[ci]) {
-      const u = s.user ? `<div class="u-note">🟡 你：${esc(s.user)}</div>` : "";
-      const a = s.ai ? `<div class="a-note">🔵 助手：${esc(s.ai)}</div>` : "";
-      parts.push(
-        `<div class="seg" id="seg-${s.id}" onclick="pick(${s.id})">` +
-          `<div class="seg-text">${esc(s.text)}</div>${u}${a}</div>`
-      );
-    }
+
+  if (!ids.length) {
+    parts.push(
+      '<div class="empty" id="cr-empty">这本书还没有任何划线或批注。<br>' +
+        '可以让 AI 通过 MCP 读原文后写下批注，或在上面的搜索框里找一段来写。</div>'
+    );
   }
+
+  let lastCh = null;
+  for (const id of ids) {
+    const s = byId.get(String(id));
+    const t = s.chTitle || "";
+    if (t && t !== lastCh) {
+      parts.push(`<h4 class="cth">${esc(t)}</h4>`);
+      lastCh = t;
+    }
+    const n = ann[String(id)];
+    const u = n.user ? `<div class="u-note">🟡 你：${esc(n.user)}</div>` : "";
+    const a = n.ai ? `<div class="a-note">🔵 助手：${esc(n.ai)}</div>` : "";
+    parts.push(
+      `<div class="seg" id="seg-${id}" onclick="pick(${id})">` +
+        `<div class="seg-mm">第 ${id} 段</div>` +
+        `<div class="seg-text">${esc(s.text)}</div>${u}${a}</div>`
+    );
+  }
+  parts.push("</div>");
+
   parts.push(`<div id="editor" hidden>
       <div id="edit-which" class="mm"></div>
       <textarea id="edit-user" placeholder="🟡 你的批注…" oninput="autoSave()"></textarea>
       <textarea id="edit-ai" placeholder="🔵 助手的批注…" oninput="autoSave()"></textarea>
       <div class="ed-row">
         <button class="sv" onclick="saveNow()" id="btn-save">💾 保存</button>
-        <span class="hint" id="save-hint">输入即自动暂存到本机；点「保存」立即写入</span>
+        <span class="hint" id="save-hint">点「保存」写入服务器，换设备同样可见</span>
       </div>
     </div>`);
   // 页尾操作条：整页批注统一在这里导出
@@ -114,44 +162,67 @@ function coreadHtml(coread) {
   return parts.join("");
 }
 
-// 共读交互 JS（与原版 COREAD_JS 一致）
+// 共读交互 JS
+// 保存语义：批注以**服务器**为准（写 KV）。本机 localStorage 只做网络失败时的草稿兜底。
 const COREAD_JS = `
+var CR_TOKEN=(function(){try{return new URLSearchParams(location.search).get('token')||''}catch(e){return ''}})();
+var cur=null;
+var CR_HITS=[];
+
 function renderNotes(el, n){
   var un=el.querySelector('.u-note'); if(un)un.remove();
   var an=el.querySelector('.a-note'); if(an)an.remove();
   if(n.user){var u=document.createElement('div');u.className='u-note';u.textContent='🟡 你：'+n.user;el.appendChild(u)}
   if(n.ai){var a=document.createElement('div');a.className='a-note';a.textContent='🔵 助手：'+n.ai;el.appendChild(a)}
 }
+function escHtml(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') }
 function persist(){
   try{ localStorage.setItem('coread-notes', JSON.stringify(COREAD_NOTES)); }catch(e){}
 }
-function loadPersisted(){
+// 本机草稿中比服务器新的条目
+function pendingLocal(){
+  var out={};
   try{
-    var s=localStorage.getItem('coread-notes');
-    if(!s) return;
+    var s=localStorage.getItem('coread-notes'); if(!s) return out;
     var saved=JSON.parse(s);
     for(var k in saved){
-      if(!COREAD_NOTES[k] || (!COREAD_NOTES[k].user && !COREAD_NOTES[k].ai) || saved[k].user || saved[k].ts > (COREAD_NOTES[k].ts||0))
-        COREAD_NOTES[k]=saved[k];
-    }
-    for(var k in COREAD_NOTES){
-      var el=document.getElementById('seg-'+k);
-      if(el) renderNotes(el, COREAD_NOTES[k]);
+      var v=saved[k]; if(!v||(!v.user&&!v.ai)) continue;
+      var c=COREAD_NOTES[k];
+      if(!c || (v.ts||0) > (c.ts||0)) out[k]=v;
     }
   }catch(e){}
+  return out;
+}
+function showSyncBar(){
+  var bar=document.getElementById('sync-bar'); if(!bar) return;
+  var n=Object.keys(pendingLocal()).length;
+  bar.hidden = !n;
+  var el=document.getElementById('sync-n'); if(el) el.textContent=n;
+}
+function syncNow(){
+  var p=pendingLocal(); if(!Object.keys(p).length) return;
+  fetch('coread/notes',{method:'POST',headers:{'Authorization':'Bearer '+CR_TOKEN,'Content-Type':'application/json'},body:JSON.stringify(p)})
+    .then(function(r){ return r.json().then(function(j){ return {ok:r.ok,j:j} }) })
+    .then(function(x){
+      if(!x.ok) throw new Error(x.j.error||('HTTP '+x.ok));
+      try{ localStorage.removeItem('coread-notes') }catch(e){}
+      location.reload();
+    })
+    .catch(function(e){ alert('同步失败：'+((e&&e.message)||e)) });
 }
 function pick(id){
   document.querySelectorAll('.seg.on').forEach(function(x){x.classList.remove('on')});
   var el=document.getElementById('seg-'+id); if(!el) return; el.classList.add('on');cur=id;
   var ed=document.getElementById('editor');
   el.after(ed); ed.hidden=false;            // 编辑器跟随点选段落
-  document.getElementById('edit-which').textContent='第 '+id+' 段 · '+(el.querySelector('.seg-text').textContent.slice(0,40))+'…';
+  var st=el.querySelector('.seg-text');
+  document.getElementById('edit-which').textContent='第 '+id+' 段 · '+((st?st.textContent:'').slice(0,40))+'…';
   var n=COREAD_NOTES[String(id)]||{};
   document.getElementById('edit-user').value=n.user||'';
   document.getElementById('edit-ai').value=n.ai||'';
-  setSaveHint('已载入本机暂存内容');
+  setSaveHint('改完点「保存」写入服务器');
 }
-// 把当前编辑框写进内存 + localStorage（空白则视为删除该段批注）
+// 写进内存 + localStorage（空白则视为删除该段批注）
 function commitNote(){
   if(cur==null) return;
   var u=document.getElementById('edit-user').value, a=document.getElementById('edit-ai').value;
@@ -170,18 +241,33 @@ function noteCount(){
 }
 function refreshFoot(){
   var el=document.getElementById('foot-hint');
-  if(el) el.textContent='已暂存 '+noteCount()+' 条批注（存在本机浏览器）· 下载 JSON 发给助手即长期保存';
+  if(el) el.textContent='已批注 '+noteCount()+' 段 · 保存后写入服务器，换设备同样可见';
 }
 function setSaveHint(msg,ok){
   var h=document.getElementById('save-hint'); if(!h) return;
-  h.textContent=msg;
-  h.className='hint'+(ok?' ok':'');
+  h.textContent=msg; h.className='hint'+(ok?' ok':'');
+}
+function postNotes(body,okMsg){
+  return fetch('coread/notes',{method:'POST',headers:{'Authorization':'Bearer '+CR_TOKEN,'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(function(r){ return r.json().then(function(j){ return {ok:r.ok,j:j} }) })
+    .then(function(x){
+      if(!x.ok) throw new Error(x.j.error||('HTTP '+x.ok));
+      try{ localStorage.removeItem('coread-notes') }catch(e){}
+      setSaveHint(okMsg+' · '+new Date().toLocaleTimeString(),true);
+      refreshFoot(); showSyncBar();
+    });
 }
 function saveNow(){
   commitNote();
+  var k=String(cur), n=COREAD_NOTES[k], body={};
+  body[k]= n ? {user:n.user||'',ai:n.ai||''} : {user:'',ai:''};
   var b=document.getElementById('btn-save');
-  if(b){var old=b.textContent;b.textContent='✓ 已保存';b.classList.add('done');setTimeout(function(){b.textContent=old;b.classList.remove('done')},1200)}
-  setSaveHint('✓ 已保存到本机 · '+new Date().toLocaleTimeString(),true);
+  postNotes(body,'✓ 已写入服务器').then(function(){
+    if(b){var old='💾 保存';b.textContent='✓ 已保存';b.classList.add('done');setTimeout(function(){b.textContent=old;b.classList.remove('done')},1200)}
+  }).catch(function(e){
+    setSaveHint('⚠ 服务器保存失败，已暂存本机：'+((e&&e.message)||e));
+    showSyncBar();
+  });
 }
 function downloadNotes(){
   commitNote();
@@ -192,14 +278,51 @@ function downloadNotes(){
   aEl.click();
   URL.revokeObjectURL(aEl.href);
 }
-// 输入即自动保存（停顿 600ms 后触发），保存按钮只是显式确认
+// 输入即自动暂存到本机（不写服务器，避免频繁 KV 写）
 var _t=null;
 function autoSave(){
   if(cur==null)return;
   clearTimeout(_t);
-  _t=setTimeout(function(){commitNote();setSaveHint('已自动暂存 · 未点保存')},600);
+  _t=setTimeout(function(){commitNote();setSaveHint('已暂存本机 · 记得点「保存」写入服务器')},600);
+}
+
+// ---- 搜索原文：给还没批注的段落写批注 ----
+function crSearch(){
+  var q=(document.getElementById('cr-q').value||'').trim(); if(!q) return;
+  var box=document.getElementById('cr-hits');
+  box.innerHTML='<div class="hits-t">搜索中…</div>';
+  fetch('coread/search?q='+encodeURIComponent(q)+'&limit=20&token='+encodeURIComponent(CR_TOKEN))
+    .then(function(r){ return r.json() })
+    .then(function(j){
+      if(j.error){ box.innerHTML='<div class="hits-t err">'+escHtml(j.error)+'</div>'; return }
+      CR_HITS=j.hits||[];
+      if(!CR_HITS.length){ box.innerHTML='<div class="hits-t">没找到「'+escHtml(q)+'」</div>'; return }
+      var h='<div class="hits-t">找到 '+CR_HITS.length+' 段，点一条去写批注</div>';
+      for(var i=0;i<CR_HITS.length;i++){
+        var t=CR_HITS[i];
+        h+='<div class="hit" onclick="addHit('+t.id+')"><b>第 '+t.id+' 段</b> · '+escHtml(t.chTitle||'')+'<div class="hit-x">'+escHtml(t.snippet||'')+'</div></div>';
+      }
+      box.innerHTML=h;
+    })
+    .catch(function(e){ box.innerHTML='<div class="hits-t err">搜索失败：'+escHtml((e&&e.message)||e)+'</div>' });
+}
+function addHit(id){
+  var rec=null;
+  for(var i=0;i<CR_HITS.length;i++) if(CR_HITS[i].id===id) rec=CR_HITS[i];
+  var seg=document.getElementById('seg-'+id);
+  if(!seg){
+    var empty=document.getElementById('cr-empty'); if(empty) empty.remove();
+    seg=document.createElement('div');
+    seg.className='seg'; seg.id='seg-'+id; seg.onclick=function(){ pick(id) };
+    seg.innerHTML='<div class="seg-mm">第 '+id+' 段 · 未批注</div><div class="seg-text">'+escHtml(rec?rec.text:'')+'</div>';
+    var list=document.getElementById('cr-list'); if(list) list.appendChild(seg);
+  }
+  pick(id);
+  var ed=document.getElementById('editor');
+  if(ed && ed.scrollIntoView) ed.scrollIntoView({block:'center',behavior:'smooth'});
 }
 refreshFoot();
+showSyncBar();
 `;
 
 // ---------------------------------------------------------------------------
@@ -396,6 +519,16 @@ h1{font-size:22px}.sub{color:var(--sub);font-size:13px;margin:4px 0 14px}
 .seg:hover{background:#fdf8ea}
 .seg.on{background:#fdf3d1;outline:1px solid var(--yellow)}
 .seg-text{font-size:14px}
+.seg-mm{font-size:11px;color:var(--sub);margin-bottom:2px}
+.cr-search{display:flex;gap:8px;margin:10px 0}
+.cr-search input{flex:1;padding:8px 12px;border:1px solid var(--line);border-radius:8px;font:inherit;background:#fff}
+.hits-t{font-size:12px;color:var(--sub);margin:6px 0}
+.hits-t.err{color:#c05050}
+.hit{padding:8px 10px;border:1px solid var(--line);border-radius:8px;margin:4px 0;cursor:pointer;font-size:13px}
+.hit:hover{background:#fdf8ea}
+.hit-x{color:var(--sub);font-size:12px;margin-top:2px}
+.sync-bar{background:#fff6e0;border:1px solid #f0dfae;border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:10px;color:#8a6d1f;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sync-bar button{padding:4px 10px;font-size:12px}
 .u-note{margin-top:5px;font-size:13px;background:#fdf6d8;border-left:3px solid var(--yellow);padding:5px 9px;border-radius:0 6px 6px 0}
 .a-note{margin-top:5px;font-size:13px;background:#f4f8fd;border-left:3px solid var(--blue);padding:5px 9px;border-radius:0 6px 6px 0}
 #editor{margin-top:12px;border-top:1px dashed var(--line);padding-top:10px}
@@ -430,7 +563,7 @@ footer{margin-top:26px;text-align:center;color:var(--sub);font-size:12px}
 // ---------------------------------------------------------------------------
 // 渲染：把采集结果 + 可选共读数据拼成自包含 HTML（结构对齐原版）
 // ---------------------------------------------------------------------------
-export function render({ shelf, nbBooks, nbTotal, details }, { generatedAt, coread = null } = {}) {
+export function render({ shelf, nbBooks, nbTotal, details }, { generatedAt, coread = null, notes = null } = {}) {
   // ---- 聚合每本书（原版口径：只保留有划线/想法的书，按最近笔记时间倒序）----
   const perBook = (nbBooks || [])
     .map((nb) => {
@@ -505,18 +638,27 @@ export function render({ shelf, nbBooks, nbTotal, details }, { generatedAt, core
     })
     .join("");
 
-  const crHtml = coreadHtml(coread);
+  const crHtml = coreadHtml(coread, notes);
   const hasCoread = !!(crHtml && coread);
+  // 注入前端的批注集（服务器 notes 为准，段落自带的 user/ai 兜底）——
+  // 前端拿它判断「本机草稿是否比服务器新」，决定要不要提示同步
   const crInit = JSON.stringify(
     hasCoread
-      ? Object.fromEntries(coread.segments.map((s) => [s.id, { user: s.user || "", ai: s.ai || "" }]))
+      ? Object.fromEntries(
+          coread.segments
+            .filter((s) => s.user || s.ai || notes?.[s.id])
+            .map((s) => {
+              const n = notes?.[s.id] || {};
+              return [s.id, { user: n.user ?? s.user ?? "", ai: n.ai ?? s.ai ?? "" }];
+            })
+        )
       : {}
   );
 
   const bookName = hasCoread ? coread.meta?.book || "?" : "";
   const crBook = hasCoread
     ? `<div class="cr-book">当前共读：<b>${esc(bookName)}</b>` +
-      `<span class="cr-book-sub">批注暂存在本机浏览器；页尾「⬇ 下载批注」导出 JSON</span></div>`
+      `<span class="cr-book-sub">全文 ${coread.meta?.totalSegments ?? coread.segments.length} 段已存服务器 · 本页只展示划线/批注 · 保存即写服务器</span></div>`
     : `<div class="cr-book">还没有共读书目` +
       `<span class="cr-book-sub">把 EPUB 拖进下面方框，自动拆段并保存（本机解析，不上传原书）</span></div>`;
 
@@ -566,7 +708,6 @@ ${shelfPage}
 <footer>微信读书官方 Agent Gateway · 双色共读：🟡你 🔵AI</footer>
 <script>
 var COREAD_NOTES=${crInit};
-var cur=null;
 function tg(h){var b=h.nextElementSibling;b.hidden=!b.hidden}
 var sb=document.querySelector('.search');
 sb.addEventListener('input',function(){var q=sb.value.trim().toLowerCase();
@@ -579,7 +720,6 @@ else{c.querySelectorAll('.mark').forEach(function(m){m.style.display=''})}
 })});
 ${COREAD_JS}
 ${EPUB_PARSE_JS}
-loadPersisted();
 ${IMPORT_JS}
 function go(w){
   document.querySelectorAll('.page').forEach(function(p){p.hidden=true});

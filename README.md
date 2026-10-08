@@ -14,10 +14,12 @@
 > ⚠️ 两份代码**不通用**：Workers 版是 fetch handler，只能在 Cloudflare 跑；VPS/本机请用 `server/`。
 
 - 传输：MCP **Streamable HTTP**（无状态），端点固定 `/mcp`
-- **看板**：内置 `GET /dashboard`，双 Tab（**📖 共读** + **📚 书架与笔记**），结构与桌面版 `weread_dashboard.py` 一致，手机浏览器直接打开
-- **原书导入**：在看板「📖 共读」里**直接拖入 EPUB**，浏览器本地拆段后自动保存（Workers 存 KV / Node 存文件）；也有 `tools/coread-upload.py` 一条命令版本
-- 存储：MCP 端点**不需要数据库**，只有你的 `wrk-` key 放在服务端
-- 工具：14 个，覆盖搜索 / 书架 / 笔记 / 阅读统计 / 点评 / 推荐
+- **看板**：内置 `GET /dashboard`，双 Tab（**📖 共读** + **📚 书架与笔记**），手机浏览器直接打开
+- **共读是「批注看板」**：📖 共读 Tab **只显示被划线/批注过的段落**（🟡 你 / 🔵 助手），整本原文**不铺在页面上**，只存在服务器供 AI 阅读
+- **AI 能读原书**：`coread_outline` / `coread_read` / `coread_search` 读原文，`coread_annotate` 写批注 —— 看板立即可见
+- **原书导入**：在看板「📖 共读」里**直接拖入 EPUB**（浏览器本地拆段），或用 `tools/coread-upload.py` 一条命令版
+- 存储：原文与批注**分开存**（Workers 用 KV / Node 用文件），只有你的 `wrk-` key 放在服务端
+- 工具：**18 个** —— 14 个微信读书网关 + 4 个共读原文/批注
 
 ---
 
@@ -27,7 +29,7 @@
 ├── LICENSE         # MIT
 ├── src/            # Cloudflare Workers 版（wrangler 入口）
 │   ├── index.js    #   MCP 服务 + /dashboard 路由
-│   └── dashboard.js #  看板渲染（两种形态共用；结构与原版 weread_dashboard.py 一致）
+│   └── dashboard.js #  看板渲染（两种形态共用）：书架页 + 只显示批注的共读页
 ├── wrangler.toml   #   └ Workers 配置
 ├── server/         # Node 版（Express + Streamable HTTP）—— VPS / 本机用
 │   ├── src/        #   服务 + 网关客户端 + dashboard.js
@@ -102,11 +104,11 @@ npx wrangler dev                 # http://127.0.0.1:8787/mcp
 
 > 未设置 `MCP_AUTH_TOKEN` 时端点不鉴权，仅适合本机调试。
 
-## 上传原书（共读数据，可选）
+## 导入原书（共读数据，可选）
 
-部署完默认只有「📚 书架与笔记」Tab。要让「📖 共读」显示**原书逐段对照**：
+「📖 共读」Tab 需要一本原书做底：打开 `https://<你的地址>/dashboard?token=<MCP_AUTH_TOKEN>` → **📖 共读** → **把 EPUB 拖进去**，搞定。（拆段在浏览器本地做，EPUB 原件不上传）
 
-打开 `https://<你的地址>/dashboard?token=<MCP_AUTH_TOKEN>` → **📖 共读** → **把 EPUB 拖进去**，搞定。（拆段在浏览器本地做，EPUB 原件不上传）
+导入的只是**原文**，页面本身不会铺开它 —— 只有被批注过的段落才显示；想让 AI 读原文、写批注，见下方 [AI 怎么读原书写批注](#ai-怎么读原书写批注)。
 
 Cloudflare 上要先绑一个 KV（只做一次，见下方[共读数据](#共读数据怎么来导入原书)）；VPS / 本机不用配。
 命令行派可以用 `python tools/coread-upload.py 你的书.epub --url <地址> --token <口令>`。
@@ -178,6 +180,10 @@ npm run start:env
 | `weread_similar` | `/book/similar` | 相似书推荐 |
 | `weread_endpoints` | `/_list` | 列出网关全部可用接口（调试用） |
 | `weread_call` | 任意 | 原始调用逃生口 |
+| `coread_outline` | 本服务 KV/文件 | **共读**：列出原书章节目录（章节 + 起止段号） |
+| `coread_read` | 本服务 KV/文件 | **共读**：按段号范围读原书正文（单次 ≤60 段，带 nextFrom） |
+| `coread_search` | 本服务 KV/文件 | **共读**：在原文里搜关键词，返回命中段落全文 |
+| `coread_annotate` | 本服务 KV/文件 | **共读**：写批注（🟡 你的 / 🔵 助手的），看板立即显示 |
 
 ---
 
@@ -196,9 +202,13 @@ https://<你的地址>/dashboard?token=<MCP_AUTH_TOKEN>
 **📚 书架与笔记**（数据实时来自官方网关）
 汇总行 + 搜索框 + **书脊色条书卡**；点书名展开该书的划线 🟡 / 想法 💭，每条下方预留 🔵 助手批注位。
 
-**📖 共读**（需导入原书，见下）
-原版书**逐段对照**：点任意段落 → 写 🟡你的 / 🔵助手的批注，编辑器里有 **💾 保存**（输入本来就会自动暂存，保存按钮用来确认）；
-**⬇ 下载批注** 统一放在**页尾**，导出整页批注 JSON。顶部「📥 导入原书」可随时拖入 / 替换 EPUB。
+**📖 共读批注**（需先导入原书，见下）
+**只显示被划线/批注过的段落**：每段带段号 + 原文 + 🟡 你的思考 / 🔵 助手的思考。整本原文**不会**铺在页面上（存在服务器，给 AI 读）。
+
+- 点段落 → 编辑器，改完点 **💾 保存** 直接写服务器（换设备同样可见）；两个框都清空再保存 = 删掉这条批注
+- 想给**还没批注**的段落写批注 → 用顶部**搜索框**在原文里找，点结果就能写
+- **⬇ 下载批注** 在页尾，导出整份 JSON
+- 保存失败（断网）会暂存本机，页面顶部出现「立即同步」提示条
 
 ## 共读数据怎么来（导入原书）
 
@@ -241,17 +251,35 @@ curl "https://<你的地址>/coread?token=<MCP_AUTH_TOKEN>"
 
 再拖一本进去就是换书（覆盖旧的）。
 
-### 批注怎么存回来
+### 数据存哪
 
-批注存在浏览器本地（localStorage），页尾 **「⬇ 下载批注」** 导出 `coread-notes.json`；
-放进书目录重跑一次导出，批注就并进 `coread.json`，再上传一次即可跨设备可见。
+| 数据 | Workers | Node | 接口 |
+|------|---------|------|------|
+| 原文（拆段后的书） | KV 键 `coread` | `server/coread.json` | `POST/GET /coread` |
+| 批注（🟡/🔵） | KV 键 `coread-notes` | `server/coread-notes.json` | `POST/GET /coread/notes` |
+
+两者**分开存**：AI 写一条批注不必重传整本书。
 
 ```bash
-python tools/coread-export.py ./weread-data/books/你的书 coread.json
+curl "https://<你的地址>/coread?token=<口令>"
+# → {"bound":true,"uploaded":true,"book":"你的书.epub","segments":2463,"annotated":12}
 ```
 
-> 还有条冷门路：`/dashboard?token=xxx&coread=<base64url>`（`coread-export.py --b64` 的输出）。
-> Cloudflare 对请求 URL 限制约 16 KB，**只够几十段的演示数据**，整本书请用上面的方式。
+### AI 怎么读原书写批注
+
+导入原书后，AI 用这 4 个工具读写（与看板共用同一份数据）：
+
+| 工具 | 干什么 |
+|------|--------|
+| `coread_outline` | 看全书章节结构 |
+| `coread_read` | 按段号读原文（`from` / `to`，单次 ≤60 段） |
+| `coread_search` | 在原文里搜关键词，拿到段落全文 |
+| `coread_annotate` | 写批注 `{id, user, ai}`，看板立即显示 |
+
+典型对话：**「读一下第 1200–1260 段，把你觉得要紧的地方写进批注」** —— AI 调 `coread_read`，再调 `coread_annotate`，你看板刷新就能看到 🔵 助手批注。
+
+> 冷门路：`/dashboard?token=xxx&coread=<base64url>`（`coread-export.py --b64` 的输出）。
+> Cloudflare 对请求 URL 限制约 16 KB，**只够几十段的演示数据**。
 
 未提供共读数据时，看板为**单页书架模式**（共读 Tab 显示导入入口）。
 
@@ -265,13 +293,14 @@ python tools/coread-export.py ./weread-data/books/你的书 coread.json
 # 自测
 
 ```bash
-node test/smoke.mjs              # MCP 端点：tools/list（14 个）+ 未知工具兜底
-node test/smoke-coread.mjs       # POST/GET /coread：鉴权、结构校验、写入（11 项）
-node test/smoke-dashboard.mjs    # 看板结构断言（书卡/汇总/搜索/批注区）
-node test/smoke-epub-parse.mjs   # 浏览器内 EPUB 解析：stored + deflate（17 项）
+node test/smoke.mjs                # MCP 端点：tools/list（18 个）+ 未知工具兜底
+node test/smoke-coread.mjs         # POST/GET /coread：鉴权、结构校验、写入（11 项）
+node test/smoke-coread-notes.mjs   # 批注读写 + 原文搜索 + 4 个 coread 工具 + 只渲染批注段（42 项）
+node test/smoke-dashboard.mjs      # 看板结构断言（书卡/汇总/搜索/批注区）
+node test/smoke-epub-parse.mjs     # 浏览器内 EPUB 解析：stored + deflate（17 项）
 
-npm i -D jsdom                   # 仅在要跑下面这条前端交互测试时需要
-node test/smoke-dashboard-dom.mjs  # 保存按钮 / 页尾下载 / 批注增删（jsdom 真跑）
+npm i jsdom --no-save              # 仅在要跑下面这条前端交互测试时需要
+node test/smoke-dashboard-dom.mjs  # 只渲染批注段 / 搜索加批注 / 保存写服务器（jsdom 真跑）
 ```
 
 ---
@@ -280,8 +309,8 @@ node test/smoke-dashboard-dom.mjs  # 保存按钮 / 页尾下载 / 批注增删�
 
 - `WEREAD_API_KEY` 只存在于服务端（Worker Secret / 服务器 `.env`），不进代码、不进日志、不进任何回包。
 - 端点鉴权靠 `MCP_AUTH_TOKEN`，**务必设置**，且不要在公开场合贴出来。
-- `POST /coread`（上传共读数据）同样要 `Bearer` 口令，**未设置口令时直接拒绝**；`GET /coread` 只回书名和段数，不回正文。
-- 本服务只做**读**类转发，不落地任何数据；共读批注等私有数据仍留在你本机。
+- `POST /coread`、`POST /coread/notes`（上传原文 / 写批注）同样要 `Bearer` 口令，**未设置口令时直接拒绝**；`GET /coread` 只回书名、段数和批注条数，**不回正文**。
+- 微信读书的数据只做**读**类转发、不落地；但**共读原文与批注会存在你的服务器上**（KV 键 `coread` / `coread-notes`，或 Node 的本地文件），仅本服务读取，同样受 `MCP_AUTH_TOKEN` 保护。
 - Node 版部署时，应用只监听 `127.0.0.1:8787`，公网仅暴露 443（见 VPS 教程「安全清单」）。
 - `skill_version` 固定为 `1.0.4`；若官方网关返回 `upgrade_info`，按提示更新 `src/weread.js`（Worker）或 `server/src/weread.js` 顶部的 `SKILL_VERSION`。
 

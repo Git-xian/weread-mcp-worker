@@ -170,8 +170,12 @@ curl -sS -X POST https://你的域名/mcp \
 python tools/coread-upload.py 你的书.epub --url https://你的域名 --token 你的MCP_AUTH_TOKEN
 ```
 
-> 想换落点：`.env` 里设 `COREAD_FILE=/你的/路径.json`（Docker 版要在 `deploy/.env` 里设，并确保该目录已挂进容器）。
-> 批注存在浏览器本地，页尾「⬇ 下载批注」导出 `coread-notes.json`；放进书目录重跑 `tools/coread-export.py` 再上传一次即可跨设备可见。
+**共读页只显示被批注过的段落**（🟡 你的 / 🔵 助手的思考）—— 整本原文不会铺在页面上，它是给 AI 读的素材。
+批注单独存 `server/coread-notes.json`（Docker 版 `deploy/data/coread-notes.json`）：
+
+- 给还没批注的段落写批注：用共读页顶部**搜索框**在原文里找
+- AI 读写原文与批注：`coread_outline` / `coread_read` / `coread_search` / `coread_annotate` 四个工具
+- 想换落点：`.env` 里设 `COREAD_FILE`（原文）/ `COREAD_NOTES_FILE`（批注）；Docker 版要在 `deploy/.env` 里设，并确保目录已挂进容器
 
 ---
 
