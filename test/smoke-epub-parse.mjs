@@ -48,11 +48,11 @@ const OPF = `<?xml version="1.0"?>
  <spine><itemref idref="c1"/><itemref idref="c2"/></spine>
 </package>`;
 
-const CH1 = `<html><head><title>第一章 城市</title></head><body>
-<p>城市就像梦境。</p><p>忽必烈问 &amp; 答 &mdash; 马可回答 &#x3002;</p><li>列表项 abc</li>
+const CH1 = `<html><head><title>第一章 示例</title></head><body>
+<p>第一段示例正文。</p><p>甲问 &amp; 答 &mdash; 乙回答 &#x3002;</p><li>列表项 abc</li>
 </body></html>`;
-const CH2 = `<html><head><title>第二章 记忆</title></head><body>
-<p>他把旅行写成了重读。</p>
+const CH2 = `<html><head><title>第二章 示例</title></head><body>
+<p>第四段示例正文。</p>
 </body></html>`;
 
 const files = [
@@ -74,12 +74,12 @@ for (const useDeflate of [false, true]) {
   const data = await parseEpub(zip, `demo-${tag}.epub`, () => {});
   const texts = data.segments.map((s) => s.text);
   check(`[${tag}] 段数 = 4`, data.segments.length === 4, `got ${data.segments.length}`);
-  check(`[${tag}] 按 spine 顺序（第1章在前）`, texts[0] === "城市就像梦境。", texts[0]);
-  check(`[${tag}] 保持章节标题`, data.segments[0].chTitle === "第一章 城市" && data.segments[3].chTitle === "第二章 记忆",
+  check(`[${tag}] 按 spine 顺序（第1章在前）`, texts[0] === "第一段示例正文。", texts[0]);
+  check(`[${tag}] 保持章节标题`, data.segments[0].chTitle === "第一章 示例" && data.segments[3].chTitle === "第二章 示例",
     `${data.segments[0].chTitle} / ${data.segments[3].chTitle}`);
   check(`[${tag}] 实体解码（&amp; &mdash; &#x3002;）`,
-    texts[1] === "忽必烈问 & 答 — 马可回答 。", texts[1]);
-  check(`[${tag}] 子目录 href 归一化（OEBPS/sub/ch2.xhtml 命中）`, texts[3] === "他把旅行写成了重读。", texts[3]);
+    texts[1] === "甲问 & 答 — 乙回答 。", texts[1]);
+  check(`[${tag}] 子目录 href 归一化（OEBPS/sub/ch2.xhtml 命中）`, texts[3] === "第四段示例正文。", texts[3]);
   check(`[${tag}] meta 完整`, data.meta.book === `demo-${tag}.epub` && data.meta.totalSegments === 4 && data.meta.chapters.length === 2);
   check(`[${tag}] 段 id 从 1 递增`, data.segments.every((s, i) => s.id === i + 1));
 }

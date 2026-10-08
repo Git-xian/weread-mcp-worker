@@ -19,10 +19,10 @@ function fakeKV() {
 }
 
 const COREAD = {
-  meta: { book: "看不见的城市.epub", totalSegments: 2 },
+  meta: { book: "示例书.epub", totalSegments: 2 },
   segments: [
-    { id: 1, ch: 0, chTitle: "第一章", text: "城市就像梦境。", user: "划线1", ai: "" },
-    { id: 2, ch: 0, chTitle: "第一章", text: "忽必烈问。", user: "", ai: "助手批注" },
+    { id: 1, ch: 0, chTitle: "第一章", text: "第一段示例正文。", user: "划线1", ai: "" },
+    { id: 2, ch: 0, chTitle: "第一章", text: "第二段示例正文。", user: "", ai: "助手批注" },
   ],
 };
 
@@ -91,7 +91,7 @@ const req = (method, body, token, path = "/coread") =>
     COREAD_KV: kv,
   });
   const j = await res.json();
-  check("正常上传 → 200 + 回摘要", res.status === 200 && j.ok && j.segments === 2 && j.book === "看不见的城市.epub", JSON.stringify(j));
+  check("正常上传 → 200 + 回摘要", res.status === 200 && j.ok && j.segments === 2 && j.book === "示例书.epub", JSON.stringify(j));
 
   // 7) GET 状态：只回摘要
   const s = await worker.fetch(req("GET", null, "t0ken"), { MCP_AUTH_TOKEN: "t0ken", COREAD_KV: kv });

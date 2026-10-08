@@ -50,11 +50,11 @@ const COREAD = {
     ],
   },
   segments: [
-    { id: 1, ch: 0, chTitle: "第一章", text: "城市就像梦境。", user: "", ai: "" },
-    { id: 2, ch: 0, chTitle: "第一章", text: "马可波罗描述着看不见的城市。", user: "", ai: "" },
-    { id: 3, ch: 0, chTitle: "第一章", text: "忽必烈听着，沉默不语。", user: "", ai: "" },
-    { id: 4, ch: 1, chTitle: "第二章", text: "记忆中的城市会变形。", user: "", ai: "" },
-    { id: 5, ch: 1, chTitle: "第二章", text: "结尾一句话。", user: "", ai: "" },
+    { id: 1, ch: 0, chTitle: "第一章", text: "第一段示例正文。", user: "", ai: "" },
+    { id: 2, ch: 0, chTitle: "第一章", text: "第二段示例正文。", user: "", ai: "" },
+    { id: 3, ch: 0, chTitle: "第一章", text: "第三段示例正文。", user: "", ai: "" },
+    { id: 4, ch: 1, chTitle: "第二章", text: "第四段示例正文。", user: "", ai: "" },
+    { id: 5, ch: 1, chTitle: "第二章", text: "第五段示例正文。", user: "", ai: "" },
   ],
 };
 
@@ -118,13 +118,13 @@ console.log("\n== 2. 批注读写 ==");
 
 console.log("\n== 3. 原文搜索 ==");
 {
-  const r = await req("/coread/search?q=" + encodeURIComponent("城市") + "&token=" + TOK);
-  check("命中 3 段", r.json?.count === 3, JSON.stringify(r.json?.hits?.map((h) => h.id)));
+  const r = await req("/coread/search?q=" + encodeURIComponent("示例") + "&token=" + TOK);
+  check("命中 5 段", r.json?.count === 5, JSON.stringify(r.json?.hits?.map((h) => h.id)));
   check("带 snippet", !!r.json?.hits?.[0]?.snippet, JSON.stringify(r.json?.hits?.[0]));
-  check("带完整 text", r.json?.hits?.[0]?.text?.includes("城市"), "");
+  check("带完整 text", r.json?.hits?.[0]?.text?.includes("示例"), "");
   const r2 = await req("/coread/search?q=zzzz&token=" + TOK);
   check("无命中 count=0", r2.json?.count === 0, JSON.stringify(r2.json));
-  const r3 = await req("/coread/search?q=%E5%9F%8E%E5%B8%82");
+  const r3 = await req("/coread/search?q=%E7%A4%BA%E4%BE%8B");
   check("无口令 401", r3.status === 401, String(r3.status));
 }
 
@@ -132,16 +132,16 @@ console.log("\n== 4. 看板只渲染有批注的段落 ==");
 {
   const notes = { 4: { user: "", ai: "只写AI" } };
   const html = render({ shelf: {}, nbBooks: [], nbTotal: 0, details: {} }, { coread: COREAD, notes });
-  check("含第 4 段正文", html.includes("记忆中的城市会变形"));
-  check("不含第 1 段正文", !html.includes("城市就像梦境"));
-  check("不含第 2 段正文", !html.includes("马可波罗描述着"));
-  check("不含第 5 段正文", !html.includes("结尾一句话"));
+  check("含第 4 段正文", html.includes("第四段示例正文"));
+  check("不含第 1 段正文", !html.includes("第一段示例正文"));
+  check("不含第 2 段正文", !html.includes("第二段示例正文"));
+  check("不含第 5 段正文", !html.includes("第五段示例正文"));
   check("含 AI 批注", html.includes("只写AI"));
   check("条数标注为 1", /共 <b>1<\/b> 条/.test(html), "");
   check("有搜索框", html.includes('id="cr-q"'));
 
   const html0 = render({ shelf: {}, nbBooks: [], nbTotal: 0, details: {} }, { coread: COREAD, notes: {} });
-  check("零批注时不出现任何正文", !html0.includes("城市就像梦境") && !html0.includes("结尾一句话"));
+  check("零批注时不出现任何正文", !html0.includes("第一段示例正文") && !html0.includes("第五段示例正文"));
   check("零批注时给空状态", html0.includes("还没有任何划线或批注"));
 }
 
@@ -159,12 +159,12 @@ console.log("\n== 5. MCP 工具 ==");
   const rd = JSON.parse((await mcp("tools/call", { name: "coread_read", arguments: { from: 1, to: 3 } })).result.content[0].text);
   check("read 返回 3 段", rd.segments.length === 3, JSON.stringify(rd).slice(0, 150));
   check("read from/to 正确", rd.from === 1 && rd.to === 3, JSON.stringify({ f: rd.from, t: rd.to }));
-  check("read 带正文", rd.segments[0].text.includes("城市"), "");
+  check("read 带正文", rd.segments[0].text.includes("第一段"), "");
 
   const rd2 = JSON.parse((await mcp("tools/call", { name: "coread_read", arguments: { from: 1, limit: 2 } })).result.content[0].text);
   check("limit 生效 + nextFrom", rd2.segments.length === 2 && rd2.nextFrom === 3, JSON.stringify({ n: rd2.segments.length, next: rd2.nextFrom }));
 
-  const ss = JSON.parse((await mcp("tools/call", { name: "coread_search", arguments: { q: "忽必烈" } })).result.content[0].text);
+  const ss = JSON.parse((await mcp("tools/call", { name: "coread_search", arguments: { q: "第三段" } })).result.content[0].text);
   check("search 命中 1 段", ss.count === 1 && ss.hits[0].id === 3, JSON.stringify(ss).slice(0, 120));
 
   const aa = JSON.parse(
@@ -176,8 +176,8 @@ console.log("\n== 5. MCP 工具 ==");
   check("落库后共 4 条（4/5 + 新写 1/3）", chk.json?.total === 4, JSON.stringify(chk.json?.total));
 
   const html2 = render({ shelf: {}, nbBooks: [], nbTotal: 0, details: {} }, { coread: COREAD, notes: chk.json.notes });
-  check("看板出现新批注段", html2.includes("城市就像梦境") && html2.includes("忽必烈听着") && html2.includes("AI 的划线思考"));
-  check("被删批注的第 2 段不再出现", !html2.includes("马可波罗描述着"));
+  check("看板出现新批注段", html2.includes("第一段示例正文") && html2.includes("第三段示例正文") && html2.includes("AI 的划线思考"));
+  check("被删批注的第 2 段不再出现", !html2.includes("第二段示例正文"));
 }
 
 console.log("\n== 6. 状态摘要 ==");
