@@ -89,6 +89,11 @@ def main():
     payload = {
         "meta": {
             "book": meta.get("book") or os.path.basename(src.rstrip("/\\")),
+            # 书名/作者/文件名都带上：微信读书那边书名可能被改过（甚至变成作者名），
+            # 多几个信号，同步时更容易对上（见 README「同步微信读书划线」）
+            "title": meta.get("title") or "",
+            "author": meta.get("author") or "",
+            "file": meta.get("file") or os.path.basename(src.rstrip("/\\")),
             "totalSegments": meta.get("totalSegments") or len(segments),
         },
         "segments": segments,

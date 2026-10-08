@@ -170,11 +170,15 @@ curl -sS -X POST https://你的域名/mcp \
 python tools/coread-upload.py 你的书.epub --url https://你的域名 --token 你的MCP_AUTH_TOKEN
 ```
 
-**共读页只显示被批注过的段落**（🟡 你的 / 🔵 助手的思考）—— 整本原文不会铺在页面上，它是给 AI 读的素材。
+**共读页只显示被批注过的段落**（🟡 你的 / 🔵 闻舟的思考）—— 整本原文不会铺在页面上，它是给 AI 读的素材。
 批注单独存 `server/coread-notes.json`（Docker 版 `deploy/data/coread-notes.json`）：
 
-- 给还没批注的段落写批注：用共读页顶部**搜索框**在原文里找
-- AI 读写原文与批注：`coread_outline` / `coread_read` / `coread_search` / `coread_annotate` 四个工具
+- 共读页**不放**原文搜索框：原文是给 AI 经 MCP 读的、给人在微信读书里读的，页面只当批注看板
+- 段落按**章节**分组，顶部有**章节目录条**：点一章跳到那章、点章标题就地折叠、右上角「全部收起 / 展开」（`第X部 / 第X章 / 序章 / 尾声 …`）；整本正文挤在一个 xhtml、文件标题又是「未知」的 EPUB，保存时会按正文里的章节标记**自动重切**
+- 编辑器**保存成功就自动收起**；也可以点「收起」或再点一次段落关掉
+- **同步你在微信读书的划线/想法**：点共读页顶部 **🔄 同步微信读书划线**（=`POST /coread/sync`），按书名匹配笔记本、按原文对齐段号 —— **想法**写进 🟡 栏、**划线**只作段落标记（黄边 +「你划过线」，**不会**变成你的评论）；🔵 闻舟批注不动
+- 书名对不上（官方版 vs 别处下的版本 / 导入书标题变作者名）时不会硬凑：看板会列出**候选书单**，点一本即绑定记住（存 `coread-bind.json`）
+- AI 读写原文与批注：`coread_outline` / `coread_read` / `coread_search` / `coread_annotate` / `coread_sync` 五个工具
 - 想换落点：`.env` 里设 `COREAD_FILE`（原文）/ `COREAD_NOTES_FILE`（批注）；Docker 版要在 `deploy/.env` 里设，并确保目录已挂进容器
 
 ---

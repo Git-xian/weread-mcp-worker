@@ -40,7 +40,11 @@ function buildZip(entries, useDeflate) {
 }
 
 const OPF = `<?xml version="1.0"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+ <metadata>
+  <dc:title>示例书 官方名</dc:title>
+  <dc:creator>某作者</dc:creator>
+ </metadata>
  <manifest>
   <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
   <item id="c2" href="sub/ch2.xhtml" media-type="application/xhtml+xml"/>
@@ -80,7 +84,12 @@ for (const useDeflate of [false, true]) {
   check(`[${tag}] 实体解码（&amp; &mdash; &#x3002;）`,
     texts[1] === "甲问 & 答 — 乙回答 。", texts[1]);
   check(`[${tag}] 子目录 href 归一化（OEBPS/sub/ch2.xhtml 命中）`, texts[3] === "第四段示例正文。", texts[3]);
-  check(`[${tag}] meta 完整`, data.meta.book === `demo-${tag}.epub` && data.meta.totalSegments === 4 && data.meta.chapters.length === 2);
+  check(
+    `[${tag}] meta 完整（书名取书内 dc:title，文件名另存）`,
+    data.meta.book === "示例书 官方名" && data.meta.title === "示例书 官方名" && data.meta.author === "某作者" &&
+      data.meta.file === `demo-${tag}.epub` && data.meta.totalSegments === 4 && data.meta.chapters.length === 2,
+    JSON.stringify(data.meta)
+  );
   check(`[${tag}] 段 id 从 1 递增`, data.segments.every((s, i) => s.id === i + 1));
 }
 

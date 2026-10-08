@@ -13,4 +13,5 @@ __pycache__/
 # 共读数据（含书正文与批注，绝不入库）
 coread.json
 coread-notes.json
+coread-bind.json
 deploy/data/

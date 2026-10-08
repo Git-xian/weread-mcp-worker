@@ -138,7 +138,8 @@ console.log("\n== 4. 看板只渲染有批注的段落 ==");
   check("不含第 5 段正文", !html.includes("第五段示例正文"));
   check("含 AI 批注", html.includes("只写AI"));
   check("条数标注为 1", /共 <b>1<\/b> 条/.test(html), "");
-  check("有搜索框", html.includes('id="cr-q"'));
+  check("共读页没有搜索框（原文由人类在微信读书里读）", !html.includes('id="cr-q"') && !html.includes('class="cr-search"'));
+  check("同步提示条在页尾（cr-foot 之后）", html.indexOf('class="cr-foot"') < html.indexOf('id="sync-bar"'));
 
   const html0 = render({ shelf: {}, nbBooks: [], nbTotal: 0, details: {} }, { coread: COREAD, notes: {} });
   check("零批注时不出现任何正文", !html0.includes("第一段示例正文") && !html0.includes("第五段示例正文"));
@@ -149,8 +150,8 @@ console.log("\n== 5. MCP 工具 ==");
 {
   const l = await mcp("tools/list", {});
   const names = (l?.result?.tools || []).map((t) => t.name);
-  check("工具数 18（14+4）", names.length === 18, names.length + " → " + names.join(","));
-  for (const n of ["coread_outline", "coread_read", "coread_search", "coread_annotate"])
+  check("工具数 19（14+5）", names.length === 19, names.length + " → " + names.join(","));
+  for (const n of ["coread_outline", "coread_read", "coread_search", "coread_annotate", "coread_sync"])
     check("含 " + n, names.includes(n));
 
   const o = JSON.parse((await mcp("tools/call", { name: "coread_outline", arguments: {} })).result.content[0].text);
@@ -186,6 +187,35 @@ console.log("\n== 6. 状态摘要 ==");
   check("annotated=4", s.json?.annotated === 4, JSON.stringify(s.json));
   const notFound = await req("/coread/nope");
   check("未知路径仍 404", notFound.status === 404, String(notFound.status));
+}
+
+console.log("\n== 7. 划线标记（mark）：划线 ≠ 评论 ==");
+{
+  const r1 = await post("/coread/notes", { 2: { mark: true } });
+  check("只写 mark 也能建条目", r1.json?.total === 5, JSON.stringify(r1.json));
+  const g1 = await req("/coread/notes", { headers: auth });
+  check(
+    "mark 条目 user/ai 都为空、mark 为真",
+    g1.json?.notes?.["2"]?.user === "" && g1.json?.notes?.["2"]?.ai === "" && g1.json?.notes?.["2"]?.mark === true,
+    JSON.stringify(g1.json?.notes?.["2"])
+  );
+
+  // 部分更新：只传 ai 时，不能把已有的 user 冲掉
+  await post("/coread/notes", { 3: { ai: "补一条AI" } });
+  const g2 = await req("/coread/notes", { headers: auth });
+  check(
+    "只传 ai → 原 user 保留（部分更新语义）",
+    g2.json?.notes?.["3"]?.user === "我的划线思考" && g2.json?.notes?.["3"]?.ai === "补一条AI",
+    JSON.stringify(g2.json?.notes?.["3"])
+  );
+
+  const h = render({ shelf: {}, nbBooks: [], nbTotal: 0, details: {} }, { coread: COREAD, notes: g2.json.notes });
+  check("划线段落出现在看板上", h.includes("第二段示例正文"));
+  check("渲染成「你划过线」而非「你：<划线原文>」", h.includes("🟡 你划过线") && !/🟡 你：第二段示例正文/.test(h), "");
+  check("该段落带 hl 类", /class="seg hl"/.test(h), "");
+
+  const r3 = await post("/coread/notes", { 2: { mark: false } });
+  check("清掉 mark 且无内容 → 删除条目", r3.json?.total === 4, JSON.stringify(r3.json));
 }
 
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);

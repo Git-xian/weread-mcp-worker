@@ -125,5 +125,55 @@ const req = (method, body, token, path = "/coread") =>
   check("/mcp 无口令 → 401（鉴权仍在）", res.status === 401, `status=${res.status}`);
 }
 
+// 11) 章结构兜底：整本正文挤在一个 xhtml、章节名是「未知」时，保存时按正文重切；
+//     本身章节结构正常的多文件书，不许被动。
+{
+  const kv = fakeKV();
+  const T = (id, text) => ({ id, ch: 0, chTitle: "未知", text });
+  const single = {
+    meta: { book: "示例书.epub", title: "示例书", totalSegments: 9, chapters: [{ idx: 0, title: "未知", segStart: 1, segEnd: 9 }] },
+    segments: [
+      T(1, "Cover"),
+      T(2, "目录"),
+      T(3, "第一部"),
+      T(4, "第二部"), // 2..4 连续 3 个标题样短段 = 目录页，应被整段跳过
+      T(5, "第一段示例正文。"),
+      T(6, "第一部"), // 真章节开始
+      T(7, "第二段示例正文。"),
+      T(8, "第二部"),
+      T(9, "第三段示例正文。"),
+    ],
+  };
+  const res = await worker.fetch(req("POST", JSON.stringify(single), "t0ken"), { MCP_AUTH_TOKEN: "t0ken", COREAD_KV: kv });
+  const j = await res.json();
+  check("上传回摘要里带 chapters 数", res.status === 200 && j.chapters === 3, JSON.stringify(j));
+  const stored = JSON.parse(kv._dump().get("coread"));
+  const chs = stored.meta.chapters;
+  check("重切成 开篇/第一部/第二部", chs.map((c) => c.title).join(",") === "开篇,第一部,第二部", JSON.stringify(chs));
+  check("目录页那 3 段没被当成章节", !chs.some((c) => c.title === "目录"));
+  check("开篇 = 1..5、第一部 = 6..7", chs[0].segStart === 1 && chs[0].segEnd === 5 && chs[1].segStart === 6 && chs[1].segEnd === 7, JSON.stringify(chs));
+  check("每段都被补上 chTitle", stored.segments[4].chTitle === "开篇" && stored.segments[5].chTitle === "第一部" && stored.segments[8].chTitle === "第二部", JSON.stringify(stored.segments.map((s) => s.chTitle)));
+  check("段号与正文没被动过", stored.segments.length === 9 && stored.segments[0].text === "Cover" && stored.segments[8].text === "第三段示例正文。");
+
+  const kv2 = fakeKV();
+  const names = ["示例章一", "示例章二", "示例章三", "示例章四"];
+  const multi = {
+    meta: {
+      book: "多文件示例.epub",
+      totalSegments: 8,
+      chapters: names.map((t, i) => ({ idx: i, title: t, segStart: i * 2 + 1, segEnd: i * 2 + 2 })),
+    },
+    segments: Array.from({ length: 8 }, (_, i) => ({
+      id: i + 1,
+      ch: Math.floor(i / 2),
+      chTitle: names[Math.floor(i / 2)],
+      text: `第 ${i + 1} 段示例正文。`,
+    })),
+  };
+  await worker.fetch(req("POST", JSON.stringify(multi), "t0ken"), { MCP_AUTH_TOKEN: "t0ken", COREAD_KV: kv2 });
+  const st2 = JSON.parse(kv2._dump().get("coread"));
+  check("多文件书的章节结构不被覆盖", st2.meta.chapters.length === 4 && st2.meta.chapters[0].title === "示例章一" && st2.meta.chapters[3].segEnd === 8, JSON.stringify(st2.meta.chapters));
+}
+
 console.log(failed ? `\n${failed} 项失败` : "\n全部通过");
 process.exit(failed ? 1 : 0);

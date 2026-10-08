@@ -41,7 +41,9 @@ if (key) {
     "共读页 / 书架页": r.text.includes('id="page-coread"') && r.text.includes('id="page-shelf"'),
     "书脊色条书卡": r.text.includes("bc-spine"),
     "汇总行": r.text.includes('class="sum-line"'),
-    "助手批注区": r.text.includes("助手批注区"),
+    "闻舟批注区（不再叫「助手」）": r.text.includes("闻舟批注区") && !r.text.includes("助手批注区"),
+    "页脚写闻舟": r.text.includes("🔵闻舟"),
+    "进度百分比不再绝对定位（曾掉出卡片）": !r.text.includes(".prog b{position:absolute"),
     "搜索框": r.text.includes('class="search"'),
     "是完整 HTML": r.text.startsWith("<!DOCTYPE html>"),
   };

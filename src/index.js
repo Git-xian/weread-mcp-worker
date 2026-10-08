@@ -5,7 +5,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { callGateway } from "./weread.js";
-import { buildDashboard } from "./dashboard.js";
+import { buildDashboard, chaptersLookDegenerate, deriveChapters } from "./dashboard.js";
 
 // ---------------------------------------------------------------------------
 // 工具定义：每个 tool 薄封装一个微信读书官方网关接口。
@@ -253,7 +253,7 @@ const TOOLS = [
   {
     name: "coread_annotate",
     description:
-      "【共读书目】给指定段落写批注，直接落 KV，看板立即可见。annotations 每项 { id, user?, ai? }：user=用户的思考，ai=助手的思考（这两栏就是看板上双色批注）；两栏都传空字符串表示删除该段批注。",
+      "【共读书目】给指定段落写批注，直接落 KV，看板立即可见。annotations 每项 { id, user?, ai?, mark? }：user=用户的思考（🟡），ai=助手的思考（🔵），mark=这段被用户划了线（只标记，不算评论）。没传的字段保持原状；传空字符串可清空；user/ai 都空且 mark=false 则删除该段条目。",
     inputSchema: {
       type: "object",
       properties: {
@@ -264,8 +264,9 @@ const TOOLS = [
             type: "object",
             properties: {
               id: { type: "integer", description: "段号" },
-              user: { type: "string", description: "用户的思考（可省略）" },
-              ai: { type: "string", description: "助手的思考（可省略）" },
+              user: { type: "string", description: "用户的思考（🟡）；不传=不改，传空串=清空" },
+              ai: { type: "string", description: "助手的思考（🔵）；不传=不改" },
+              mark: { type: "boolean", description: "是否标记为用户划线（划线 ≠ 评论）；不传=不改" },
             },
             required: ["id"],
           },
@@ -279,10 +280,28 @@ const TOOLS = [
       if (!list.length) throw new Error("annotations 为空");
       await getCoread(env); // 校验书已上传，避免写进一个没原文的批注库
       const patch = {};
-      for (const it of list) patch[String(it.id)] = { user: it.user ?? "", ai: it.ai ?? "" };
+      for (const it of list) {
+        const rec = {};
+        if (it.user !== undefined) rec.user = it.user;
+        if (it.ai !== undefined) rec.ai = it.ai;
+        if (it.mark !== undefined) rec.mark = !!it.mark;
+        patch[String(it.id)] = rec;
+      }
       const r = await mergeNotes(env, patch);
       return { ok: true, changed: r.changed, totalAnnotated: r.total, ids: Object.keys(patch) };
     },
+  },
+  {
+    name: "coread_sync",
+    description:
+      "【共读书目】把你在微信读书里的划线 + 想法拉进共读看板。划线只标「划过线」（不写进 🟡 评论），想法才写进 🟡「你的思考」栏。默认按共读书名自动匹配微信读书笔记本（容忍版本后缀 / 文件名差异 / 导入书标题变作者名；匹配不上会返回 candidates 候选书单，选中一个后再传 bookId 即绑定记住）。只覆盖 user/mark，AI 的 🔵 批注一律保留。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        bookId: { type: "string", description: "微信读书 bookId（可选，默认按共读书名匹配）" },
+      },
+    },
+    handler: (a, env) => syncUserNotes(env, { bookId: a?.bookId }),
   },
 ];
 
@@ -452,12 +471,20 @@ async function handleCoreadUpload(request, env, url) {
     return json({ error: "结构不对：需要 { meta:{book,totalSegments}, segments:[{id,ch,chTitle,text,user,ai}] }" }, 400);
   }
 
+  // 章结构兜底：整本正文挤在一个 xhtml 里的 EPUB，「按文件切章」等于没切，
+  // 这里按正文里的章节标记（第X部/章 …）重切一次，否则看板全挂在一章下面。
+  if (!data.meta) data.meta = {};
+  if (chaptersLookDegenerate(data.meta, data.segments)) {
+    data.meta.chapters = deriveChapters(data.segments, data.meta.title || data.meta.book || "");
+  }
+
   await env.COREAD_KV.put("coread", JSON.stringify(data));
   return json({
     ok: true,
     key: "coread",
     book: data.meta?.book ?? null,
     segments: data.segments.length,
+    chapters: (data.meta?.chapters || []).length,
     bytes: raw.length,
     view: "/dashboard?token=<MCP_AUTH_TOKEN>",
   });
@@ -473,8 +500,19 @@ async function handleCoreadStatus(request, env, url) {
   const data = await env.COREAD_KV.get("coread", "json");
   const notes = await readNotes(env);
   const annotated = Object.keys(notes).length;
+  const binds = await readBinds(env);
+  const bindKey = data ? wantOf(data).cleans[0] || "" : "";
+  const bound = bindKey ? binds[bindKey] || null : null;
   if (!data) return json({ bound: true, uploaded: false, annotated });
-  return json({ bound: true, uploaded: true, book: data.meta?.book ?? null, segments: data.segments?.length ?? 0, annotated });
+  return json({
+    bound: true,
+    uploaded: true,
+    book: data.meta?.book ?? null,
+    author: data.meta?.author ?? null,
+    segments: data.segments?.length ?? 0,
+    annotated,
+    linked: bound ? { bookId: bound.bookId, title: bound.title || null } : null, // 已绑定的微信读书笔记本
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -493,26 +531,399 @@ async function readNotes(env) {
   }
 }
 
+// 批注条目结构：{ user, ai, mark?, ts }
+//   user = 用户的思考（看板 🟡 栏）；ai = 助手的思考（🔵 栏）；
+//   mark = 用户在这段划过线 —— 只做标记，**不算评论**（避免把划线当成想法）。
+// 传进来的字段「没给」= 保持原状；给空字符串 = 清空；三者都空 = 删除该段条目。
 async function mergeNotes(env, patch) {
   const cur = await readNotes(env);
+  const has = (o, x) => o != null && Object.prototype.hasOwnProperty.call(o, x);
   let changed = 0;
   for (const [k, v] of Object.entries(patch || {})) {
     if (!/^\d+$/.test(k)) continue;
-    const user = String(v?.user ?? "").trim();
-    const ai = String(v?.ai ?? "").trim();
-    if (!user && !ai) {
+    const before = cur[k] || {};
+    const user = has(v, "user") ? String(v.user ?? "").trim() : before.user || "";
+    const ai = has(v, "ai") ? String(v.ai ?? "").trim() : before.ai || "";
+    const mark = has(v, "mark") ? !!v.mark : !!before.mark;
+    if (!user && !ai && !mark) {
       if (cur[k]) {
         delete cur[k];
         changed++;
       }
       continue;
     }
-    const before = cur[k] || {};
-    if (before.user !== user || before.ai !== ai) changed++;
-    cur[k] = { user, ai, ts: v?.ts ?? Date.now() };
+    if (before.user === user && before.ai === ai && !!before.mark === mark) continue; // 没变化就不写
+    const next = { user, ai, ts: v?.ts ?? Date.now() };
+    if (mark) next.mark = true;
+    cur[k] = next;
+    changed++;
   }
   await env.COREAD_KV.put("coread-notes", JSON.stringify(cur));
   return { changed, total: Object.keys(cur).length };
+}
+
+// ---------------------------------------------------------------------------
+// 微信读书 → 共读批注 同步
+//   把用户自己的划线（/book/bookmarklist）与想法（/review/list/mine）按原文
+//   匹配到共读段号：划线 → 只标 mark（看板显示「🟡 你划过线」，不当成评论）；
+//   想法 → 写进 user 栏（看板 🟡「你的思考」）。只动 user/mark，ai 原样保留。
+// ---------------------------------------------------------------------------
+const stripTags = (s) => String(s ?? "").replace(/<[^>]+>/g, "").trim();
+
+// 归一化：去 .epub 后缀 / 去空白 / 去书名号引号 / 转小写，便于跨源比对同一段文字
+function normMatch(s) {
+  return String(s ?? "")
+    .replace(/\.epub$/i, "")
+    .replace(/[\s\u00a0\u3000]+/g, "")
+    .replace(/[《》「」『』【】“”‘’"'’]/g, "")
+    .toLowerCase();
+}
+
+// 书名噪声词：版本 / 装帧 / 站点来源……跨版本比对时先抹掉。
+// 为什么需要：微信读书读的常是官方版，交给 AI 的却是别处下的版本，
+// 文件名会多出「精装版 / 全X册 / z-library.sk」这类差异，不抹掉就永远配不上。
+const NAME_NOISE =
+  /(epub|mobi|azw3?|pdf|txt|docx?|扫描版|影印版|精装|平装|典藏|珍藏|纪念版|新版|全本|完整版|修订版|增订版|插图版|注释版|双语版|中文版|简体版|繁体版|全集|文集|套装|合集|合辑|全[一二三四五六七八九十\d]*册|第[一二三四五六七八九十百\d]+版|zlib|zlibrary|z-library|1lib|libgen|annasarchive|annas-archive|libsk|thepiratebay|epubee|kindle|amazon|unknown|undefined|administrator|佚名)/gi;
+
+const stripNoise = (s) => String(s ?? "").replace(NAME_NOISE, "");
+// 去掉所有括号（圆/方/书名号外的方括号）里的内容 —— 作者名、站点名、丛书名都在里面
+const dropBrackets = (s) => String(s ?? "").replace(/[（(【\[][^）)】\]]*[）)】\]]/g, " ");
+
+/**
+ * 书名的「可比对形态」：去扩展名 → 去括号 → 去版本噪声 → 归一化。
+ * 「示例书 (某作者) (z-library.sk).epub」→「示例书」
+ */
+function nameClean(s) {
+  return normMatch(stripNoise(dropBrackets(String(s ?? "").replace(/\.epub$/i, ""))));
+}
+
+/**
+ * 把书名/文件名切成若干可比较的词：括号外的正文 + 括号里的每一段，再按分隔符拆。
+ * 「示例书 (某作者) (z-library.sk).epub」→ ["示例书", "某作者"]
+ * 为什么需要：自己导入微信读书的 EPUB，那本书的笔记标题常常变成**作者名**
+ * （导入书的 title 会是作者名、author 是站点生成的占位串），得靠这些词兜底。
+ */
+function nameTokens(s) {
+  const raw = String(s ?? "").replace(/\.epub$/i, "");
+  const out = [];
+  const push = (x) => {
+    for (const w of normMatch(stripNoise(x)).split(/[·:：,，、_/／|~～\-—+&]+/)) {
+      if (w.length >= 3 && !out.includes(w)) out.push(w);
+    }
+  };
+  push(dropBrackets(raw));
+  for (const m of raw.matchAll(/[（(]([^）)]*)[）)]/g)) push(m[1]);
+  if (!out.length) push(raw);
+  return out;
+}
+
+// 最长公共子串长度（书名都短，O(n·m) 够用）——用于「换了译本 / 改了副标题」的近似匹配
+function lcsLen(a, b) {
+  if (!a || !b) return 0;
+  const n = b.length;
+  let prev = new Array(n + 1).fill(0);
+  let best = 0;
+  for (let i = 1; i <= a.length; i++) {
+    const cur = new Array(n + 1).fill(0);
+    for (let j = 1; j <= n; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        cur[j] = prev[j - 1] + 1;
+        if (cur[j] > best) best = cur[j];
+      }
+    }
+    prev = cur;
+  }
+  return best;
+}
+
+/**
+ * 给一个微信读书笔记本打相似度分（0~1）。
+ * 想「别那么精准也认得出」，但**不能乱认**：标题必须有实打实的重合；
+ * 作者只做加成、不单独决定（否则同一作者的其他书会被误配）。
+ */
+function scoreNotebook(want, entry) {
+  const nTitle = entry?.book?.title || entry?.title || "";
+  const nAuthor = entry?.book?.author || entry?.author || "";
+  const tClean = nameClean(nTitle);
+  const tTokens = nameTokens(nTitle);
+  let s = 0;
+  if (tClean && want.cleans.includes(tClean)) s = 1;
+  else if (tClean) {
+    for (const w of want.tokens) {
+      for (const c of tTokens.length ? tTokens : [tClean]) {
+        if (!c) continue;
+        if (w === c) s = Math.max(s, 0.9);
+        else {
+          const L = lcsLen(w, c);
+          // 最长公共子串要够长、且占较长那个词的比重够大，才算「像」（避免短书名到处碰瓷）
+          if (L >= 3) s = Math.max(s, 0.5 + (0.4 * L) / Math.max(w.length, c.length));
+        }
+      }
+    }
+  }
+  const aClean = nameClean(nAuthor);
+  const aHit =
+    !!want.author && !!aClean && (aClean === want.author || (want.author.length >= 3 && aClean.includes(want.author)));
+  if (s >= 0.5 && aHit) s = Math.min(1, s + 0.06); // 作者一致：只加成，不独自决定
+  return { bookId: entry?.bookId, title: nTitle, author: nAuthor, score: Math.round(s * 100) / 100 };
+}
+
+/** 共读书名的所有比对信号：原始名 / 真实书名 / 文件名 → 词 + 归一化形态 + 作者 */
+function wantOf(coread) {
+  const m = coread?.meta || {};
+  const names = [m.book, m.title, m.file].filter((x) => x && String(x).trim());
+  const tokens = [];
+  const cleans = [];
+  for (const x of names) {
+    for (const t of nameTokens(x)) if (!tokens.includes(t)) tokens.push(t);
+    const c = nameClean(x);
+    if (c && !cleans.includes(c)) cleans.push(c);
+  }
+  return { names, tokens, cleans, author: nameClean(m.author || "") };
+}
+
+/**
+ * 用一段「锚文本」（微信读书的划线原文 / 想法所附原文）在共读段落里定位。
+ * 先找「锚文本完整落在一段内」；找不到再退而求其次「一整段落在锚文本内」（跨段划线）。
+ * 太短的锚文本（<4 字）直接放弃，避免满书乱命中。
+ */
+export function matchSegments(segments, anchor, maxInside = 3, maxContaining = 3) {
+  const key = normMatch(anchor);
+  if (key.length < 4) return [];
+  const inside = [];
+  const containing = [];
+  for (const s of segments) {
+    const ns = normMatch(s.text);
+    if (!ns) continue;
+    if (ns.includes(key)) {
+      inside.push(s.id);
+      if (inside.length >= maxInside) break;
+    } else if (ns.length >= 6 && key.includes(ns)) {
+      containing.push(s.id);
+    }
+  }
+  return inside.length ? inside : containing.slice(0, maxContaining);
+}
+
+/**
+ * 把 bookmarks / myReviews 映射成 { 段id → { texts:[想法…], mark:bool } }
+ *
+ *   - 纯划线（bookmark）→ 只把该段标成 mark=true，**不写进 user**。
+ *     看板据此在段落上打「🟡 你划过线」标记，而不是把你的划线当成你的评论。
+ *   - 想法（review）→ 文字进 texts（看板 🟡 栏）；它通常附着在一段划线原文上，
+ *     所以顺带把命中的段也标 mark=true。
+ */
+export function buildUserNotes(coread, bookmarks, reviews) {
+  const map = new Map();
+  let hlHit = 0,
+    hlMiss = 0,
+    thHit = 0,
+    thMiss = 0;
+
+  const ensure = (id) => {
+    if (!map.has(id)) map.set(id, { texts: [], mark: false });
+    return map.get(id);
+  };
+
+  for (const b of bookmarks?.updated || []) {
+    const t = b?.markText || "";
+    if (!t.trim()) continue;
+    const ids = matchSegments(coread.segments, t);
+    if (ids.length) hlHit++;
+    else hlMiss++;
+    for (const id of ids) ensure(id).mark = true;
+  }
+  for (const it of reviews?.reviews || []) {
+    const r = it?.review || {};
+    const anchor = r.abstract || stripTags(r.htmlContent) || "";
+    const thought = stripTags(r.content) || stripTags(it?.content) || "";
+    if (!anchor.trim() && !thought.trim()) continue;
+    const ids = matchSegments(coread.segments, anchor || thought);
+    if (ids.length) thHit++;
+    else thMiss++;
+    for (const id of ids) {
+      const e = ensure(id);
+      if (anchor.trim()) e.mark = true;
+      if (thought && !e.texts.includes(thought)) e.texts.push(thought);
+    }
+  }
+  return { map, hlHit, hlMiss, thHit, thMiss };
+}
+
+// 书名 ↔ 微信读书 bookId 的绑定：手动点选或自动命中后记住，
+// 下次同步直接用，不再重新猜（键 = 归一化后的共读书名）。
+const BIND_KEY = "coread-bind";
+const MATCH_MIN = 0.7; // 自动匹配的下限；低于它只给候选，绝不硬凑
+
+async function readBinds(env) {
+  try {
+    return (env.COREAD_KV && (await env.COREAD_KV.get(BIND_KEY, "json"))) || {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeBind(env, key, bookId, title) {
+  if (!key || !bookId) return;
+  try {
+    const all = await readBinds(env);
+    if (all[key]?.bookId === String(bookId)) return;
+    all[key] = { bookId: String(bookId), title: title || "", ts: Date.now() };
+    await env.COREAD_KV.put(BIND_KEY, JSON.stringify(all));
+  } catch {
+    /* 绑定只是加速，写不上不影响本次同步 */
+  }
+}
+
+async function dropBind(env, key) {
+  if (!key) return;
+  try {
+    const all = await readBinds(env);
+    if (all[key]) {
+      delete all[key];
+      await env.COREAD_KV.put(BIND_KEY, JSON.stringify(all));
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * 在「有笔记的书」里按相似度找 bookId。
+ * 匹配不上（或不够像）就只回候选书单 + 分数，让用户在看板上点选绑定 —— 不硬凑。
+ */
+async function resolveBookId(env, coread, explicit) {
+  if (explicit) return { bookId: String(explicit), matched: "手动指定" };
+  let list = [];
+  let note = null;
+  try {
+    const nb = await callGateway("/user/notebooks", { count: 100 }, env);
+    list = nb.books || nb.notebooks || [];
+  } catch (e) {
+    note = String(e?.message ?? e);
+    list = [];
+  }
+  const want = wantOf(coread);
+  const scored = list
+    .map((b) => scoreNotebook(want, b))
+    .filter((x) => x.bookId)
+    .sort((a, b) => b.score - a.score);
+  const candidates = scored.slice(0, 10);
+  const best = scored[0];
+  if (!best || best.score < MATCH_MIN) return { bookId: null, candidates, note };
+  const second = scored[1];
+  const ambiguous = !!(second && second.score >= MATCH_MIN && second.score >= best.score - 0.05);
+  const how = best.score >= 1 ? "书名" : best.score >= 0.9 ? "书名/作者关键词" : "近似书名";
+  return {
+    bookId: best.bookId,
+    title: best.title,
+    matched: `${how}（${best.score}）`,
+    score: best.score,
+    ambiguous,
+    candidates,
+  };
+}
+
+/** 执行同步：拉微信读书 → 匹配 → 合并进 notes（保留 ai） */
+export async function syncUserNotes(env, { bookId } = {}) {
+  if (!env.COREAD_KV) throw new Error("COREAD_KV 未绑定");
+  const coread = await getCoread(env);
+  const want = wantOf(coread);
+  const bindKey = want.cleans[0] || "";
+
+  const pull = async (id) =>
+    Promise.all([
+      callGateway("/book/bookmarklist", { bookId: id }, env),
+      callGateway("/review/list/mine", { bookid: id, count: 100 }, env),
+    ]);
+
+  let r = null;
+  if (bookId) {
+    r = { bookId: String(bookId), matched: "手动指定" };
+    await writeBind(env, bindKey, bookId, "");
+  } else {
+    const binds = await readBinds(env);
+    if (bindKey && binds[bindKey]?.bookId) {
+      r = { bookId: binds[bindKey].bookId, title: binds[bindKey].title, matched: "沿用上次绑定" };
+    }
+  }
+
+  let bookmarks, myReviews;
+  if (r) {
+    try {
+      [bookmarks, myReviews] = await pull(r.bookId);
+    } catch (e) {
+      if (bookId) throw e; // 手动指定的失败，如实报错
+      await dropBind(env, bindKey); // 绑定失效（书没了/换账号）→ 清掉，回到自动匹配
+      r = null;
+    }
+  }
+  if (!r) {
+    r = await resolveBookId(env, coread, undefined);
+    if (!r.bookId) {
+      const out = {
+        ok: false,
+        error: "微信读书里没找到与共读书名匹配的笔记本，可在看板上点选一本绑定",
+        want: coread?.meta?.book || null,
+        candidates: r.candidates || [],
+      };
+      if (r.note) out.hint = r.note;
+      return out;
+    }
+    [bookmarks, myReviews] = await pull(r.bookId);
+    await writeBind(env, bindKey, r.bookId, r.title);
+  }
+
+  const built = buildUserNotes(coread, bookmarks, myReviews);
+  const notes = await readNotes(env);
+  let written = 0;
+  for (const [id, e] of built.map) {
+    const k = String(id);
+    const user = e.texts.join(" / ");
+    const mark = !!e.mark;
+    const before = notes[k] || {};
+    if (before.user === user && !!before.mark === mark) continue; // 没变化就不写，省 KV 写额度
+    const next = { user, ai: before.ai || "", ts: Date.now() };
+    if (mark) next.mark = true;
+    notes[k] = next;
+    written++;
+  }
+  if (written) await env.COREAD_KV.put("coread-notes", JSON.stringify(notes));
+
+  const entries = Object.values(notes);
+  return {
+    ok: true,
+    book: { id: r.bookId, title: r.title || null },
+    matched: r.matched || null, // 命中的方式（书名 / 作者关键词 / 近似），便于核对
+    score: r.score ?? null,
+    ambiguous: !!r.ambiguous, // 有另一本分数接近 → 提示可能选错，可显式传 bookId
+    highlights: (bookmarks?.updated || []).length,
+    thoughts: (myReviews?.reviews || []).length,
+    matchedSegments: built.map.size,
+    markedSegments: entries.filter((n) => n?.mark).length,
+    written,
+    unmatched: { highlights: built.hlMiss, thoughts: built.thMiss },
+    totalAnnotated: entries.length,
+  };
+}
+
+async function handleCoreadSync(request, env, url) {
+  const token = bearer(request) || url.searchParams.get("token") || "";
+  if (!env.MCP_AUTH_TOKEN || token !== env.MCP_AUTH_TOKEN) return json({ error: "unauthorized" }, 401);
+  let body = {};
+  try {
+    const t = await request.text();
+    if (t.trim()) body = JSON.parse(t);
+  } catch {
+    body = {};
+  }
+  const bookId = body?.bookId || url.searchParams.get("bookId") || undefined;
+  try {
+    const out = await syncUserNotes(env, { bookId });
+    return json(out, out.ok ? 200 : 404);
+  } catch (e) {
+    return json({ error: String(e?.message ?? e) }, 500);
+  }
 }
 
 async function handleNotes(request, env, url) {
@@ -601,7 +1012,7 @@ export default {
 
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
     if (url.pathname === "/" || url.pathname === "/healthz") {
-      return json({ ok: true, name: "weread-mcp", endpoint: "/mcp", dashboard: "/dashboard", coread: "/coread", notes: "/coread/notes", search: "/coread/search" });
+      return json({ ok: true, name: "weread-mcp", endpoint: "/mcp", dashboard: "/dashboard", coread: "/coread", notes: "/coread/notes", search: "/coread/search", sync: "/coread/sync" });
     }
     if (url.pathname === "/dashboard" || url.pathname === "/dashboard/") {
       return handleDashboard(request, env, url);
@@ -613,6 +1024,10 @@ export default {
     }
     if (url.pathname === "/coread/notes" || url.pathname === "/coread/notes/") {
       if (request.method === "GET" || request.method === "POST") return handleNotes(request, env, url);
+      return json({ error: "method not allowed" }, 405);
+    }
+    if (url.pathname === "/coread/sync" || url.pathname === "/coread/sync/") {
+      if (request.method === "POST") return handleCoreadSync(request, env, url);
       return json({ error: "method not allowed" }, 405);
     }
     if (url.pathname === "/coread/search" || url.pathname === "/coread/search/") {

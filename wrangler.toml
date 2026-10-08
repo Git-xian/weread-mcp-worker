@@ -3,6 +3,15 @@ main = "src/index.js"
 compatibility_date = "2026-10-01"
 compatibility_flags = ["nodejs_compat"]
 
+# 保留 workers.dev 作为备用入口（正式入口见下方自定义域名）
+workers_dev = true
+
+# 自定义域名（2026-10-08）：部署时 CF 自动建 DNS 记录与证书
+# 注：wenzhou.yuan9.dpdns.org 已有外部 DNS 记录，故改用 test 前缀
+routes = [
+  { pattern = "test.yuan9.dpdns.org", custom_domain = true }
+]
+
 # 密钥不写在这里，用 wrangler secret put 存：
 #   wrangler secret put WEREAD_API_KEY     # 微信读书 wrk- 开头的 key
 #   wrangler secret put MCP_AUTH_TOKEN     # 你自己给手机端约定的访问口令（可自定义一串随机字符）
@@ -21,6 +30,9 @@ compatibility_flags = ["nodejs_compat"]
 # 不想用命令行：部署后在 Cloudflare 后台建 KV → 给 Worker 加变量名
 # COREAD_KV 的绑定 → 在 KV 编辑器里粘贴 JSON；或直接 POST 到 /coread（见 README）。
 # ---------------------------------------------------------------------------
-# [[kv_namespaces]]
-# binding = "COREAD_KV"
-# id = "<粘贴 npx wrangler kv namespace create 返回的 id>"
+# 共读数据 KV（已创建，2026-10-08）—— 看板「📖 共读」Tab 的段落数据存这里
+# 换库重建：npx wrangler kv namespace create COREAD_KV
+# ---------------------------------------------------------------------------
+[[kv_namespaces]]
+binding = "COREAD_KV"
+id = "5ebd776647824a4ebec55acb9b238943"

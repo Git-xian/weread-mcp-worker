@@ -51,9 +51,19 @@ def main():
         if n.endswith(".opf"):
             opf_name = n
             break
+    meta_title, meta_author = "", ""
     if opf_name:
         opf = z.read(opf_name).decode("utf-8", "ignore")
         base = os.path.dirname(opf_name)
+        # 取 EPUB 自己的书名/作者（dc:title / dc:creator）——
+        # 文件名常被下载站改得面目全非，书内元数据才更可能跟微信读书的书名对上
+        m = re.search(r"<dc:title[^>]*>(.*?)</dc:title>", opf, re.S | re.I) or \
+            re.search(r"<title[^>]*>(.*?)</title>", opf, re.S | re.I)
+        if m:
+            meta_title = html_mod.unescape(TAG.sub("", m.group(1))).strip()
+        m = re.search(r"<dc:creator[^>]*>(.*?)</dc:creator>", opf, re.S | re.I)
+        if m:
+            meta_author = html_mod.unescape(TAG.sub("", m.group(1))).strip()
         manifest = dict(re.findall(r'<item[^>]*id="([^"]+)"[^>]*href="([^"]+)"', opf))
         for idref in re.findall(r'<itemref[^>]*idref="([^"]+)"', opf):
             href = manifest.get(idref)
@@ -84,8 +94,9 @@ def main():
             seg_idx += 1
         chapters.append({"idx": ci, "title": title, "segStart": seg_start, "segEnd": seg_idx})
     db.commit()
-    meta = {"book": os.path.basename(epub_path), "chapters": chapters, "totalSegments": seg_idx,
-            "dbPath": db_path}
+    meta = {"book": meta_title or os.path.basename(epub_path), "title": meta_title,
+            "author": meta_author, "file": os.path.basename(epub_path),
+            "chapters": chapters, "totalSegments": seg_idx, "dbPath": db_path}
     with open(os.path.join(out_dir, "book.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     db.close()
