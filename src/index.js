@@ -188,15 +188,34 @@ const TOOLS = [
   {
     name: "coread_outline",
     description:
-      "【共读书目】列出服务器上共读书目的章节目录（章节标题 + 起止段号）。先看结构，再决定读哪几段。",
+      "【共读书目】列出章节目录（标题 + 起止段号），并附带每章已有的批注覆盖：annotated=有批注/划线的段数，you=用户写过想法的段数，ai=已批过的段数。先看结构再决定读哪几段 —— 优先挑 annotated 少的章，别重复劳动。",
     inputSchema: { type: "object", properties: {} },
     handler: async (_a, env) => {
       const coread = await getCoread(env);
       const meta = coread.meta || {};
+      const notes = await readNotes(env);
+      const chapters = (meta.chapters || []).map((c) => ({ ...c, annotated: 0, you: 0, ai: 0 }));
+      const chOf = new Map(coread.segments.map((s) => [Number(s.id), s.ch]));
+      for (const [k, n] of Object.entries(notes)) {
+        if (!n) continue;
+        const ci = chOf.get(Number(k));
+        const c = Number.isInteger(ci) ? chapters[ci] : null;
+        if (!c) continue;
+        if (n.user) c.you++;
+        if (n.ai) c.ai++;
+        if (n.user || n.ai || n.mark) c.annotated++;
+      }
+      const all = Object.values(notes);
       return {
         book: meta.book ?? null,
         totalSegments: meta.totalSegments ?? coread.segments.length,
-        chapters: meta.chapters || [],
+        coverage: {
+          annotated: all.length,
+          you: all.filter((n) => n?.user).length,
+          ai: all.filter((n) => n?.ai).length,
+          both: all.filter((n) => n?.user && n?.ai).length,
+        },
+        chapters,
       };
     },
   },
@@ -253,7 +272,7 @@ const TOOLS = [
   {
     name: "coread_annotate",
     description:
-      "【共读书目】给指定段落写批注，直接落 KV，看板立即可见。annotations 每项 { id, user?, ai?, mark? }：user=用户的思考（🟡），ai=助手的思考（🔵），mark=这段被用户划了线（只标记，不算评论）。没传的字段保持原状；传空字符串可清空；user/ai 都空且 mark=false 则删除该段条目。",
+      "【共读书目】给指定段落写批注，直接落 KV，看板立即可见。annotations 每项 { id, user?, ai?, mark? }：user=用户的思考（🟡），ai=助手的思考（🔵），mark=这段被用户划了线（只标记，不算评论）。没传的字段保持原状；传空字符串可清空；user/ai 都空且 mark=false 则删除该段条目。★写作要求：如果这段跟书里别处有呼应，请在 ai 里用「见第 812 段：……」的写法引用 —— 看板会把它渲染成可点击跳转，这是「读过整本」才拿得出的东西，别只就这一段论这一段。每次调用会自动生成批次号并返回 batch；写坏了可以用 coread_undo 整批回滚。",
     inputSchema: {
       type: "object",
       properties: {
@@ -265,12 +284,13 @@ const TOOLS = [
             properties: {
               id: { type: "integer", description: "段号" },
               user: { type: "string", description: "用户的思考（🟡）；不传=不改，传空串=清空" },
-              ai: { type: "string", description: "助手的思考（🔵）；不传=不改" },
+              ai: { type: "string", description: "助手的思考（🔵）；不传=不改。跨段呼应用「见第 N 段：……」" },
               mark: { type: "boolean", description: "是否标记为用户划线（划线 ≠ 评论）；不传=不改" },
             },
             required: ["id"],
           },
         },
+        batch: { type: "string", description: "批次号（可选）。同一轮多批批注想一起撤销时传同一个值；不传则自动生成" },
       },
       required: ["annotations"],
     },
@@ -279,16 +299,17 @@ const TOOLS = [
       const list = Array.isArray(a.annotations) ? a.annotations : [];
       if (!list.length) throw new Error("annotations 为空");
       await getCoread(env); // 校验书已上传，避免写进一个没原文的批注库
+      const batch = a.batch ? String(a.batch) : "b" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const patch = {};
       for (const it of list) {
-        const rec = {};
+        const rec = { batch };
         if (it.user !== undefined) rec.user = it.user;
         if (it.ai !== undefined) rec.ai = it.ai;
         if (it.mark !== undefined) rec.mark = !!it.mark;
         patch[String(it.id)] = rec;
       }
       const r = await mergeNotes(env, patch);
-      return { ok: true, changed: r.changed, totalAnnotated: r.total, ids: Object.keys(patch) };
+      return { ok: true, changed: r.changed, totalAnnotated: r.total, ids: Object.keys(patch), batch };
     },
   },
   {
@@ -303,6 +324,27 @@ const TOOLS = [
     },
     handler: (a, env) => syncUserNotes(env, { bookId: a?.bookId }),
   },
+  {
+    name: "coread_undo",
+    description:
+      "【共读书目】按批次撤销 AI 批注。不传 batch 就撤销最新一批；传 batch 撤销指定批次。只清 🔵 AI 那侧，🟡 用户的思考和他们划的线一律保留；某段清完什么都不剩就整条删除。用于「AI 一次批了几十段，其中一半是废话」的场合。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        batch: { type: "string", description: "批次号（coread_annotate 返回值里的 batch）；不传=最近一批" },
+      },
+    },
+    handler: async (a, env) => {
+      if (!env.COREAD_KV) throw new Error("COREAD_KV 未绑定");
+      let batch = a?.batch ? String(a.batch) : "";
+      if (!batch) {
+        batch = latestBatch(await readNotes(env));
+        if (!batch) return { ok: true, cleared: 0, hint: "没有带批次号的 AI 批注可撤销（老数据没有批次号）" };
+      }
+      const r = await undoBatch(env, batch);
+      return { ok: true, ...r };
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -310,7 +352,7 @@ const TOOLS = [
 // ---------------------------------------------------------------------------
 function createServer(env) {
   const server = new Server(
-    { name: "weread-mcp", version: "0.1.0" },
+    { name: "weread-mcp", version: "0.2.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -555,11 +597,50 @@ async function mergeNotes(env, patch) {
     if (before.user === user && before.ai === ai && !!before.mark === mark) continue; // 没变化就不写
     const next = { user, ai, ts: v?.ts ?? Date.now() };
     if (mark) next.mark = true;
+    // batch：这一笔属于哪一批写入 —— 撤销按批回滚。
+    // 用户的编辑不会带新 batch，所以老的批次号会一路继承下来。
+    if (v?.batch) next.batch = String(v.batch);
+    else if (before.batch) next.batch = before.batch;
     cur[k] = next;
     changed++;
   }
   await env.COREAD_KV.put("coread-notes", JSON.stringify(cur));
   return { changed, total: Object.keys(cur).length };
+}
+
+/**
+ * 按批次撤销：只清 🔵 ai 那一侧，🟡 user 与你划的线一律保留。
+ * 某段清完什么都不剩（没想法也没划线）就整条删掉。
+ */
+async function undoBatch(env, batch) {
+  const cur = await readNotes(env);
+  let cleared = 0;
+  for (const [k, v] of Object.entries(cur)) {
+    if (!v || v.batch !== batch || !v.ai) continue;
+    if (v.user || v.mark) {
+      delete v.ai;
+      delete v.batch;
+    } else {
+      delete cur[k];
+    }
+    cleared++;
+  }
+  if (cleared) await env.COREAD_KV.put("coread-notes", JSON.stringify(cur));
+  return { cleared, batch, total: Object.keys(cur).length };
+}
+
+/** 找最近一批 AI 批注的批次号（按 ts 最新）；没有就返回空串 */
+function latestBatch(notes) {
+  let best = "",
+    bestTs = 0;
+  for (const n of Object.values(notes || {})) {
+    if (!n?.ai || !n.batch) continue;
+    if ((n.ts || 0) > bestTs) {
+      bestTs = n.ts || 0;
+      best = n.batch;
+    }
+  }
+  return best;
 }
 
 // ---------------------------------------------------------------------------
@@ -952,6 +1033,30 @@ async function handleNotes(request, env, url) {
 }
 
 // ---------------------------------------------------------------------------
+// 撤销一批 AI 批注：POST /coread/undo  { batch?: "b..." }
+//   不传 batch = 撤销最新一批。只清 ai，user/mark 保留。
+// ---------------------------------------------------------------------------
+async function handleUndo(request, env, url) {
+  const token = bearer(request) || url.searchParams.get("token") || "";
+  if (!env.MCP_AUTH_TOKEN || token !== env.MCP_AUTH_TOKEN) return json({ error: "unauthorized" }, 401);
+  if (!env.COREAD_KV) return json({ error: "COREAD_KV 未绑定" }, 400);
+  const raw = await request.text();
+  let body = {};
+  try {
+    body = JSON.parse(raw || "{}");
+  } catch {
+    return json({ error: "body 需要是 JSON" }, 400);
+  }
+  let batch = body?.batch ? String(body.batch) : "";
+  if (!batch) {
+    batch = latestBatch(await readNotes(env));
+    if (!batch) return json({ ok: true, cleared: 0, hint: "没有带批次号的 AI 批注可撤销" });
+  }
+  const r = await undoBatch(env, batch);
+  return json({ ok: true, ...r });
+}
+
+// ---------------------------------------------------------------------------
 // 搜索原文：GET /coread/search?q=xxx&limit=20
 // 纯服务端搜索，人类看板的搜索框与 AI 的 coread_search 工具共用。
 // ---------------------------------------------------------------------------
@@ -1028,6 +1133,10 @@ export default {
     }
     if (url.pathname === "/coread/sync" || url.pathname === "/coread/sync/") {
       if (request.method === "POST") return handleCoreadSync(request, env, url);
+      return json({ error: "method not allowed" }, 405);
+    }
+    if (url.pathname === "/coread/undo" || url.pathname === "/coread/undo/") {
+      if (request.method === "POST") return handleUndo(request, env, url);
       return json({ error: "method not allowed" }, 405);
     }
     if (url.pathname === "/coread/search" || url.pathname === "/coread/search/") {

@@ -137,7 +137,7 @@ console.log("\n== 4. 看板只渲染有批注的段落 ==");
   check("不含第 2 段正文", !html.includes("第二段示例正文"));
   check("不含第 5 段正文", !html.includes("第五段示例正文"));
   check("含 AI 批注", html.includes("只写AI"));
-  check("条数标注为 1", /共 <b>1<\/b> 条/.test(html), "");
+  check("概览标注为 1 段", /被批注<\/strong>的 1 段/.test(html), "");
   check("共读页没有搜索框（原文由人类在微信读书里读）", !html.includes('id="cr-q"') && !html.includes('class="cr-search"'));
   check("同步提示条在页尾（cr-foot 之后）", html.indexOf('class="cr-foot"') < html.indexOf('id="sync-bar"'));
 
@@ -150,12 +150,17 @@ console.log("\n== 5. MCP 工具 ==");
 {
   const l = await mcp("tools/list", {});
   const names = (l?.result?.tools || []).map((t) => t.name);
-  check("工具数 19（14+5）", names.length === 19, names.length + " → " + names.join(","));
+  check("工具数 20（14+6）", names.length === 20, names.length + " → " + names.join(","));
   for (const n of ["coread_outline", "coread_read", "coread_search", "coread_annotate", "coread_sync"])
     check("含 " + n, names.includes(n));
 
   const o = JSON.parse((await mcp("tools/call", { name: "coread_outline", arguments: {} })).result.content[0].text);
   check("outline 章节数 2 + 书名", o.chapters.length === 2 && o.book === "测试书.epub", JSON.stringify(o));
+  check(
+    "outline 带批注覆盖（coverage + 每章 annotated/you/ai）",
+    !!o.coverage && typeof o.coverage.annotated === "number" && "annotated" in (o.chapters[0] || {}) && "ai" in (o.chapters[0] || {}),
+    JSON.stringify(o.coverage) + " " + JSON.stringify(o.chapters[0])
+  );
 
   const rd = JSON.parse((await mcp("tools/call", { name: "coread_read", arguments: { from: 1, to: 3 } })).result.content[0].text);
   check("read 返回 3 段", rd.segments.length === 3, JSON.stringify(rd).slice(0, 150));
@@ -216,6 +221,46 @@ console.log("\n== 7. 划线标记（mark）：划线 ≠ 评论 ==");
 
   const r3 = await post("/coread/notes", { 2: { mark: false } });
   check("清掉 mark 且无内容 → 删除条目", r3.json?.total === 4, JSON.stringify(r3.json));
+}
+
+console.log("\n== 9. 按批次撤销 AI 批注 ==");
+{
+  const a = JSON.parse(
+    (
+      await mcp("tools/call", {
+        name: "coread_annotate",
+        arguments: {
+          annotations: [
+            { id: 1, user: "撤销测试·我的" },
+            { id: 2, ai: "撤销测试·AI 独占" },
+            { id: 3, user: "撤销测试·两边", ai: "撤销测试·AI" },
+          ],
+        },
+      })
+    ).result.content[0].text
+  );
+  check("annotate 自动生成批次号", typeof a.batch === "string" && a.batch.startsWith("b"), String(a.batch));
+
+  const u = JSON.parse(
+    (await mcp("tools/call", { name: "coread_undo", arguments: { batch: a.batch } })).result.content[0].text
+  );
+  check("撤销清掉 3 条 ai", u.cleared === 3, JSON.stringify(u));
+
+  const notes = (await req("/coread/notes", { headers: auth })).json.notes;
+  check("你自己的思考保留", notes["1"]?.user === "撤销测试·我的", JSON.stringify(notes["1"]));
+  check("纯 AI 的条目整条删除", !notes["2"], JSON.stringify(notes["2"]));
+  check("两边都有的只清 ai、留下你的", notes["3"]?.user === "撤销测试·两边" && !notes["3"]?.ai, JSON.stringify(notes["3"]));
+
+  // 看板按钮走的是 HTTP 入口，单独验一遍
+  await post("/coread/notes", { 4: { ai: "再写一条", batch: "b_http" } });
+  const ur = await req("/coread/undo", {
+    method: "POST",
+    headers: { ...auth, "Content-Type": "application/json" },
+    body: JSON.stringify({ batch: "b_http" }),
+  });
+  check("POST /coread/undo 可用", ur.status === 200 && ur.json?.cleared === 1, JSON.stringify(ur.json));
+  const notes2 = (await req("/coread/notes", { headers: auth })).json.notes;
+  check("撤销后条目消失", !notes2["4"], JSON.stringify(notes2["4"]));
 }
 
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);

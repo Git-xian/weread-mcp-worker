@@ -238,7 +238,7 @@ check("段落上出现了「🟡 你：」", /🟡 你：/.test(doc.getElementBy
 
 // ---------- 7. 页尾下载 ----------
 doc.querySelector("#coread .cr-foot button.dl").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-check("页尾按钮下载 coread-notes.json", downloaded?.name === "coread-notes.json", JSON.stringify(downloaded));
+check("页尾按钮导出 Markdown", downloaded?.name === "共读笔记-测试书.md", JSON.stringify(downloaded));
 
 // ---------- 8. 导入区还在 ----------
 check("有导入原书的折叠区", !!doc.querySelector("details.imp"));
@@ -246,14 +246,14 @@ check("有拖拽区与文件选择", !!doc.getElementById("drop") && !!doc.getEl
 
 // ---------- 9. 同步微信读书划线 ----------
 check("有「同步微信读书」按钮", !!doc.getElementById("btn-sync"));
-check("按钮在共读面板里", !!doc.querySelector("#coread .cr-tools #btn-sync"));
+check("按钮在共读页尾", !!doc.querySelector("#coread .cr-foot #btn-sync"));
 check("按钮文案含「同步微信读书」", /同步微信读书/.test(doc.getElementById("btn-sync").textContent));
 doc.getElementById("btn-sync").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await sleep(80);
 const syncCall = calls.find((c) => c.url.includes("coread/sync"));
 check("点击后 POST /coread/sync", !!syncCall, JSON.stringify(calls.map((c) => c.url)));
 check("按钮点后进入同步中/已同步状态", /同步中|已同步/.test(doc.getElementById("btn-sync").textContent), doc.getElementById("btn-sync").textContent);
-check("同步结果显示在提示行", /已同步/.test(doc.getElementById("sync-hint").textContent), doc.getElementById("sync-hint").textContent);
+check("同步结果显示在浮动提示", /已同步/.test(doc.getElementById("cr-toast").textContent), doc.getElementById("cr-toast").textContent);
 
 // ---------- 10. 匹配不上 → 列候选，点一本即绑定 ----------
 check("候选区默认隐藏", doc.getElementById("cr-cands").hidden === true);
@@ -265,7 +265,7 @@ check("候选区展开", box.hidden === false);
 check("候选里有可点的书", !!box.querySelector("button.cand"));
 check("候选带书名与相似度分数", /测试书/.test(box.textContent) && !!box.querySelector("button.cand .cs"), box.textContent.slice(0, 60));
 check("文案说明没自动认出", /没自动认出/.test(box.textContent), box.textContent.slice(0, 60));
-check("提示行引导点选", /点选/.test(doc.getElementById("sync-hint").textContent), doc.getElementById("sync-hint").textContent);
+check("提示引导点选", /点选/.test(doc.getElementById("cr-toast").textContent), doc.getElementById("cr-toast").textContent);
 check("匹配不上不算失败：按钮恢复可点", doc.getElementById("btn-sync").disabled === false);
 
 syncMode = "ok";
@@ -273,7 +273,7 @@ box.querySelector("button.cand").dispatchEvent(new window.MouseEvent("click", { 
 await sleep(80);
 const bindCall = calls[calls.length - 1];
 check("点候选 → 带 bookId 再发同步", bindCall.url.includes("coread/sync") && bindCall.body?.bookId === "B1", JSON.stringify(bindCall));
-check("绑定后提示已绑定并同步", /已绑定并同步/.test(doc.getElementById("sync-hint").textContent), doc.getElementById("sync-hint").textContent);
+check("绑定后提示已绑定并同步", /已绑定并同步/.test(doc.getElementById("cr-toast").textContent), doc.getElementById("cr-toast").textContent);
 check("候选区收起", doc.getElementById("cr-cands").hidden === true);
 
 // ---------- 12. 保存完自动收起编辑器 ----------
@@ -320,6 +320,98 @@ check("候选区收起", doc.getElementById("cr-cands").hidden === true);
   check("不再用会掉出卡片的绝对定位", !h.includes(".prog b{position:absolute"), "");
   check("书卡里有「闻舟批注区」", h.includes("闻舟批注区") && !h.includes("助手批注区"), "");
   check("页脚不再写 AI", !h.includes("🔵AI") && h.includes("🔵闻舟"), "");
+}
+
+// ---------- 13. v2 新增：概览 / 四档筛选 / 跨段跳转 / 撤销批次 / Markdown 导出 ----------
+{
+  const c2 = {
+    meta: {
+      book: "示例书",
+      totalSegments: 6,
+      chapters: [
+        { idx: 0, title: "甲章", segStart: 1, segEnd: 3 },
+        { idx: 1, title: "乙章", segStart: 4, segEnd: 6 },
+      ],
+    },
+    segments: [1, 2, 3, 4, 5, 6].map((i) => ({
+      id: i,
+      ch: i <= 3 ? 0 : 1,
+      chTitle: i <= 3 ? "甲章" : "乙章",
+      text: `第 ${i} 段示例正文。`,
+    })),
+  };
+  // 四种形态各来一个：只有你写的 / 只有 AI 批的 / 两边都有 / 被跨段引用的
+  const n2 = {
+    1: { user: "只有我写的", ai: "", ts: 1700000000000 },
+    2: { user: "", ai: "只有 AI 批的", ts: 1700000000000, batch: "b_x" },
+    3: { user: "两边都有", ai: "我也觉得。见第 5 段：那里也提到了。", ts: 1700000000000, batch: "b_x" },
+    5: { user: "", ai: "被引用的一段", ts: 1700000000000, batch: "b_x" },
+  };
+  const d2 = new JSDOM(render({ shelf: {}, nbBooks: [], nbTotal: 0, details: {} }, { generatedAt: "2026-01-01", coread: c2, notes: n2 }), {
+    runScripts: "dangerously",
+    pretendToBeVisual: true,
+    url: "http://localhost/dashboard?token=t",
+  });
+  const w2 = d2.window;
+  const doc2 = w2.document;
+  let dl2 = null;
+  const posts2 = [];
+  w2.URL.createObjectURL = () => "blob:fake";
+  w2.URL.revokeObjectURL = () => {};
+  w2.HTMLAnchorElement.prototype.click = function () {
+    if (this.download) dl2 = { name: this.download };
+  };
+  w2.confirm = () => true;
+  w2.Element.prototype.scrollIntoView = function () {};
+  w2.fetch = (url, opts = {}) => {
+    posts2.push({ url: String(url), body: opts.body ? JSON.parse(opts.body) : null });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, cleared: 3 }) });
+  };
+
+  const visCount = () => [...doc2.querySelectorAll("#coread .seg")].filter((s) => !s.hidden).length;
+
+  const html2 = doc2.getElementById("coread").innerHTML;
+  check("筛选「我写的」计数 2", /我写的<i>2<\/i>/.test(html2), "");
+  check("筛选「AI 批的」计数 3", /AI 批的<i>3<\/i>/.test(html2), "");
+  check("筛选「两边都有」计数 1", /两边都有<i>1<\/i>/.test(html2), "");
+  check("四档筛选都在", doc2.querySelectorAll("#cr-filters button").length === 4);
+  check("默认全部可见 4 段", visCount() === 4, String(visCount()));
+
+  const clickFilter = (f) =>
+    doc2.querySelector(`#cr-filters button[data-f="${f}"]`).dispatchEvent(new w2.MouseEvent("click", { bubbles: true }));
+
+  clickFilter("mine");
+  check("筛选「我写的」剩 2 段", visCount() === 2, String(visCount()));
+  check("「我写的」选中态", doc2.querySelector('#cr-filters button[data-f="mine"]').classList.contains("on"));
+
+  clickFilter("ai");
+  check("筛选「AI 批的」剩 3 段", visCount() === 3, String(visCount()));
+
+  clickFilter("both");
+  check("筛选「两边都有」剩 1 段", visCount() === 1, String(visCount()));
+  check("筛选后空章节整章隐藏", [...doc2.querySelectorAll("#coread .cr-ch")].filter((s) => !s.hidden).length === 1);
+  check("目录条计数跟着筛选变", /<i>1<\/i>/.test(doc2.querySelector("#cr-toc").innerHTML));
+
+  clickFilter("all");
+  check("切回全部恢复 4 段", visCount() === 4, String(visCount()));
+
+  const ref = doc2.querySelector("#seg-3 .seg-ref");
+  check("「见第 5 段」渲染成可点链接", !!ref && ref.getAttribute("data-seg") === "5", ref ? ref.outerHTML.slice(0, 60) : "null");
+  ref.dispatchEvent(new w2.MouseEvent("click", { bubbles: true }));
+  check("点跨段链接不会冒泡成打开编辑器", doc2.getElementById("editor").hidden === true);
+
+  const undoBtn = doc2.getElementById("btn-undo");
+  check("撤销按钮显示本批条数", !undoBtn.hidden && /3 条/.test(undoBtn.textContent), undoBtn.textContent);
+  undoBtn.dispatchEvent(new w2.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  check(
+    "撤销发 POST /coread/undo（带 batch）",
+    posts2.some((p) => p.url.includes("coread/undo") && p.body?.batch === "b_x"),
+    JSON.stringify(posts2.map((p) => p.url))
+  );
+
+  doc2.querySelector("#coread .cr-foot button.dl").dispatchEvent(new w2.MouseEvent("click", { bubbles: true }));
+  check("导出的是 Markdown 而不是 JSON", dl2?.name === "共读笔记-示例书.md", JSON.stringify(dl2));
 }
 
 console.log(failed ? `\n${failed} 项失败` : "\n全部通过");

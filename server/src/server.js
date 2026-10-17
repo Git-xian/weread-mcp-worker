@@ -206,15 +206,35 @@ const TOOLS = [
   // -------------------------------------------------------------------------
   {
     name: "coread_outline",
-    description: "【共读书目】列出服务器上共读书目的章节目录（章节标题 + 起止段号）。先看结构，再决定读哪几段。",
+    description:
+      "【共读书目】列出章节目录（标题 + 起止段号），并附带每章已有的批注覆盖：annotated=有批注/划线的段数，you=用户写过想法的段数，ai=已批过的段数。先看结构再决定读哪几段 —— 优先挑 annotated 少的章，别重复劳动。",
     inputSchema: { type: "object", properties: {} },
     handler: async () => {
       const coread = getCoread();
       const meta = coread.meta || {};
+      const notes = readNotes();
+      const chapters = (meta.chapters || []).map((c) => ({ ...c, annotated: 0, you: 0, ai: 0 }));
+      const chOf = new Map(coread.segments.map((s) => [Number(s.id), s.ch]));
+      for (const [k, n] of Object.entries(notes)) {
+        if (!n) continue;
+        const ci = chOf.get(Number(k));
+        const c = Number.isInteger(ci) ? chapters[ci] : null;
+        if (!c) continue;
+        if (n.user) c.you++;
+        if (n.ai) c.ai++;
+        if (n.user || n.ai || n.mark) c.annotated++;
+      }
+      const all = Object.values(notes);
       return {
         book: meta.book ?? null,
         totalSegments: meta.totalSegments ?? coread.segments.length,
-        chapters: meta.chapters || [],
+        coverage: {
+          annotated: all.length,
+          you: all.filter((n) => n?.user).length,
+          ai: all.filter((n) => n?.ai).length,
+          both: all.filter((n) => n?.user && n?.ai).length,
+        },
+        chapters,
       };
     },
   },
@@ -271,7 +291,7 @@ const TOOLS = [
   {
     name: "coread_annotate",
     description:
-      "【共读书目】给指定段落写批注，直接落盘，看板立即可见。annotations 每项 { id, user?, ai?, mark? }：user=用户的思考（🟡），ai=助手的思考（🔵），mark=这段被用户划了线（只标记，不算评论）。没传的字段保持原状；传空字符串可清空；user/ai 都空且 mark=false 则删除该段条目。",
+      "【共读书目】给指定段落写批注，直接落盘，看板立即可见。annotations 每项 { id, user?, ai?, mark? }：user=用户的思考（🟡），ai=助手的思考（🔵），mark=这段被用户划了线（只标记，不算评论）。没传的字段保持原状；传空字符串可清空；user/ai 都空且 mark=false 则删除该段条目。★写作要求：如果这段跟书里别处有呼应，请在 ai 里用「见第 812 段：……」的写法引用 —— 看板会把它渲染成可点击跳转，这是「读过整本」才拿得出的东西，别只就这一段论这一段。每次调用会自动生成批次号并返回 batch；写坏了可以用 coread_undo 整批回滚。",
     inputSchema: {
       type: "object",
       properties: {
@@ -283,12 +303,13 @@ const TOOLS = [
             properties: {
               id: { type: "integer", description: "段号" },
               user: { type: "string", description: "用户的思考（🟡）；不传=不改，传空串=清空" },
-              ai: { type: "string", description: "助手的思考（🔵）；不传=不改" },
+              ai: { type: "string", description: "助手的思考（🔵）；不传=不改。跨段呼应用「见第 N 段：……」" },
               mark: { type: "boolean", description: "是否标记为用户划线（划线 ≠ 评论）；不传=不改" },
             },
             required: ["id"],
           },
         },
+        batch: { type: "string", description: "批次号（可选）。同一轮多批批注想一起撤销时传同一个值；不传则自动生成" },
       },
       required: ["annotations"],
     },
@@ -296,16 +317,17 @@ const TOOLS = [
       const list = Array.isArray(a.annotations) ? a.annotations : [];
       if (!list.length) throw new Error("annotations 为空");
       getCoread(); // 校验书已上传
+      const batch = a.batch ? String(a.batch) : "b" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const patch = {};
       for (const it of list) {
-        const rec = {};
+        const rec = { batch };
         if (it.user !== undefined) rec.user = it.user;
         if (it.ai !== undefined) rec.ai = it.ai;
         if (it.mark !== undefined) rec.mark = !!it.mark;
         patch[String(it.id)] = rec;
       }
       const r = mergeNotes(patch);
-      return { ok: true, changed: r.changed, totalAnnotated: r.total, ids: Object.keys(patch) };
+      return { ok: true, changed: r.changed, totalAnnotated: r.total, ids: Object.keys(patch), batch };
     },
   },
   {
@@ -320,6 +342,25 @@ const TOOLS = [
     },
     handler: (a) => syncUserNotes({ bookId: a?.bookId }),
   },
+  {
+    name: "coread_undo",
+    description:
+      "【共读书目】按批次撤销 AI 批注。不传 batch 就撤销最新一批；传 batch 撤销指定批次。只清 🔵 AI 那侧，🟡 用户的思考和他们划的线一律保留；某段清完什么都不剩就整条删除。用于「AI 一次批了几十段，其中一半是废话」的场合。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        batch: { type: "string", description: "批次号（coread_annotate 返回值里的 batch）；不传=最近一批" },
+      },
+    },
+    handler: async (a) => {
+      let batch = a?.batch ? String(a.batch) : "";
+      if (!batch) {
+        batch = latestBatch(readNotes());
+        if (!batch) return { ok: true, cleared: 0, hint: "没有带批次号的 AI 批注可撤销（老数据没有批次号）" };
+      }
+      return { ok: true, ...undoBatch(batch) };
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -327,7 +368,7 @@ const TOOLS = [
 // ---------------------------------------------------------------------------
 function createServer() {
   const server = new Server(
-    { name: "weread-mcp-server", version: "0.1.0" },
+    { name: "weread-mcp-server", version: "0.2.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -411,12 +452,54 @@ function mergeNotes(patch) {
     if (before.user === user && before.ai === ai && !!before.mark === mark) continue; // 没变化就不写
     const next = { user, ai, ts: v?.ts ?? Date.now() };
     if (mark) next.mark = true;
+    // batch：这一笔属于哪一批写入 —— 撤销按批回滚。
+    // 用户的编辑不会带新 batch，所以老的批次号会一路继承下来。
+    if (v?.batch) next.batch = String(v.batch);
+    else if (before.batch) next.batch = before.batch;
     cur[k] = next;
     changed++;
   }
   fs.mkdirSync(path.dirname(NOTES_PATH), { recursive: true });
   fs.writeFileSync(NOTES_PATH, JSON.stringify(cur));
   return { changed, total: Object.keys(cur).length };
+}
+
+/**
+ * 按批次撤销：只清 🔵 ai 那一侧，🟡 user 与你划的线一律保留。
+ * 某段清完什么都不剩（没想法也没划线）就整条删掉。
+ */
+function undoBatch(batch) {
+  const cur = readNotes();
+  let cleared = 0;
+  for (const [k, v] of Object.entries(cur)) {
+    if (!v || v.batch !== batch || !v.ai) continue;
+    if (v.user || v.mark) {
+      delete v.ai;
+      delete v.batch;
+    } else {
+      delete cur[k];
+    }
+    cleared++;
+  }
+  if (cleared) {
+    fs.mkdirSync(path.dirname(NOTES_PATH), { recursive: true });
+    fs.writeFileSync(NOTES_PATH, JSON.stringify(cur));
+  }
+  return { cleared, batch, total: Object.keys(cur).length };
+}
+
+/** 找最近一批 AI 批注的批次号（按 ts 最新）；没有就返回空串 */
+function latestBatch(notes) {
+  let best = "",
+    bestTs = 0;
+  for (const n of Object.values(notes || {})) {
+    if (!n?.ai || !n.batch) continue;
+    if ((n.ts || 0) > bestTs) {
+      bestTs = n.ts || 0;
+      best = n.batch;
+    }
+  }
+  return best;
 }
 
 // ---------------------------------------------------------------------------
@@ -823,6 +906,19 @@ app.get("/coread/notes", (req, res) => {
   }
   const notes = readNotes();
   res.json({ total: Object.keys(notes).length, notes });
+});
+
+// 撤销一批 AI 批注：POST /coread/undo { batch? }（不传=最新一批）
+app.post("/coread/undo", express.json({ limit: "64kb" }), (req, res) => {
+  if (!authOk(req) && String(req.query.token || "") !== AUTH_TOKEN) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  let batch = req.body?.batch ? String(req.body.batch) : "";
+  if (!batch) {
+    batch = latestBatch(readNotes());
+    if (!batch) return res.json({ ok: true, cleared: 0, hint: "没有带批次号的 AI 批注可撤销" });
+  }
+  res.json({ ok: true, ...undoBatch(batch) });
 });
 
 // 原文搜索（看板搜索框与 AI 的 coread_search 共用）

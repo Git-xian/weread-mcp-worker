@@ -121,13 +121,15 @@ export function deriveChapters(segments, fallbackTitle) {
 // 采集：并发拉基础数据，再按批拉每本书的划线 + 想法
 // ---------------------------------------------------------------------------
 export async function collect(gw, { maxBooks = 12 } = {}) {
+  // 三个基础请求全部降级：网关鉴权失败 / 限流时，书架页空着没关系，
+  // 共读批注必须还能打开 —— 否则 key 一过期，自己写的笔记也跟着看不见了。
   const [shelf, stats, notebooks] = await Promise.all([
-    gw("/shelf/sync", {}),
+    gw("/shelf/sync", {}).catch(() => null),
     gw("/readdata/detail", { mode: "overall" }).catch(() => null),
-    gw("/user/notebooks", { count: 50 }),
+    gw("/user/notebooks", { count: 50 }).catch(() => null),
   ]);
 
-  const allNb = notebooks.books || notebooks.notebooks || [];
+  const allNb = notebooks?.books || notebooks?.notebooks || [];
   const nbBooks = allNb.slice(0, maxBooks);
 
   const details = {};
@@ -179,13 +181,48 @@ function coreadHtml(coread, notes) {
   }
   for (const [k, n] of Object.entries(notes || {})) {
     if (!n || (!n.user && !n.ai && !n.mark)) delete ann[k];
-    else ann[k] = { user: n.user || "", ai: n.ai || "", mark: !!n.mark };
+    else
+      ann[k] = {
+        user: n.user || "",
+        ai: n.ai || "",
+        mark: !!n.mark,
+        ts: Number(n.ts) || 0,
+        batch: n.batch || "",
+      };
   }
 
   const ids = Object.keys(ann)
     .filter((k) => byId.has(k))
     .map(Number)
     .sort((a, b) => a - b);
+  const idSet = new Set(ids);
+
+  // 概览三个数：你写的 / AI 批的 / 两边都有（最后一个才是共读真正生效的地方）
+  let nYou = 0,
+    nAi = 0,
+    nBoth = 0;
+  for (const id of ids) {
+    const n = ann[String(id)];
+    if (n.user) nYou++;
+    if (n.ai) nAi++;
+    if (n.user && n.ai) nBoth++;
+  }
+
+  // 批注里的「见第 812 段」→ 可点的段内锚点。
+  // 先 esc 再替换：匹配的只是「第 812 段」这种纯文本，不会把标签喂进 HTML。
+  const aihtml = (s) =>
+    esc(s).replace(/第\s{0,2}(\d{1,5})\s{0,2}段/g, (m, d) =>
+      idSet.has(Number(d))
+        ? `<a class="seg-ref" data-seg="${Number(d)}" onclick="jumpSeg(${Number(d)},event);return false">${m}</a>`
+        : m
+    );
+
+  const day = (ts) => {
+    const n = Number(ts) || 0;
+    if (!n) return "";
+    const d = new Date(n);
+    return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
 
   // 按章分组（只对有批注/划线的段落分组；无章信息的老数据归到同一组）
   const groups = [];
@@ -198,16 +235,27 @@ function coreadHtml(coread, notes) {
 
   const parts = [
     '<div class="panel" id="coread">',
-    '<h3 class="cr-head">📖 共读批注' +
-      `<span class="cr-sub">本页只显示<strong>被划线/批注</strong>的段落 · 共 <b>${ids.length}</b> 条 · 整本原文存在服务器（闻舟可经 MCP 读取）</span></h3>`,
-    // 从微信读书拉「我的划线 + 想法」进 🟡 栏（一次点击，服务端直接拉）
-    '<div class="cr-tools">' +
-      '<button class="sy" id="btn-sync" onclick="crSync(this)">🔄 同步微信读书划线</button>' +
-      '<span class="hint" id="sync-hint">拉你在微信读书的划线（只标记该段）+ 想法（才进 🟡 栏），只动你那一侧</span>' +
-      '</div>' +
+    '<h3 class="cr-head">' +
+      '<span class="cr-title">📖 共读批注</span>' +
+      `<span class="cr-sub">只显示<strong>被划线 / 被批注</strong>的 ${ids.length} 段 · 原文在服务器上，供 AI 读</span>` +
+      '</h3>',
     // 自动匹配不上时，在这里列候选书单，点一本即绑定（记住，下次直接用）
     '<div class="cr-cands" id="cr-cands" hidden></div>',
   ];
+  // 四档筛选：「两边都有」是共读真正生效的地方 —— 以前埋在长列表里，没有任何出口。
+  // 零批注时不渲染（一排 0 没有信息量，只会挤占空状态的位置）。
+  if (ids.length) {
+    parts.splice(
+      1,
+      0,
+      '<div class="cr-filters" id="cr-filters">' +
+        `<button data-f="all" class="on" onclick="crFilter('all',this)">全部<i>${ids.length}</i></button>` +
+        `<button data-f="mine" onclick="crFilter('mine',this)"><span class="dot you"></span>我写的<i>${nYou}</i></button>` +
+        `<button data-f="ai" onclick="crFilter('ai',this)"><span class="dot ai"></span>AI 批的<i>${nAi}</i></button>` +
+        `<button data-f="both" onclick="crFilter('both',this)"><span class="dot both"></span>两边都有<i>${nBoth}</i></button>` +
+        '</div>'
+    );
+  }
 
   // 章节目录条：点一章即跳到那章（顺带展开），再点章标题可就地折叠
   if (groups.length > 1) {
@@ -247,15 +295,19 @@ function coreadHtml(coread, notes) {
       // 划线只做标记（黄底 + 小标签），**只有想法才**渲染成「🟡 你：」——划线 ≠ 评论
       const mk = n.mark && !n.user ? '<div class="u-mark">🟡 你划过线</div>' : "";
       const u = n.user ? `<div class="u-note">🟡 你：${esc(n.user)}</div>` : "";
-      const a = n.ai ? `<div class="a-note">🔵 闻舟：${esc(n.ai)}</div>` : "";
+      // aihtml：批注里的「见第 812 段」渲染成可点锚点（AI 读过整本的证据）
+      const a = n.ai ? `<div class="a-note">🔵 闻舟：${aihtml(n.ai)}</div>` : "";
+      const t = day(n.ts);
       parts.push(
-        `<div class="seg${n.mark ? " hl" : ""}" id="seg-${id}" onclick="pick(${id})">` +
-          `<div class="seg-mm">第 ${id} 段</div>` +
+        `<div class="seg${n.mark ? " hl" : ""}" id="seg-${id}"` +
+          ` data-u="${n.user ? 1 : 0}" data-a="${n.ai ? 1 : 0}" onclick="pick(${id})">` +
+          `<div class="seg-mm"><span>第 ${id} 段</span>${t ? `<span>${t}</span>` : ""}</div>` +
           `<div class="seg-text">${esc(s.text)}</div>${mk}${u}${a}</div>`
       );
     }
     parts.push("</div></section>");
   });
+  parts.push('<div class="empty" id="cr-empty-filter" hidden>这个筛选下还没有内容 —— 切回「全部」看看</div>');
   parts.push("</div>");
   // 浮动提示：编辑器收起后「已写入服务器」也要看得见
   parts.push('<div id="cr-toast" class="toast"></div>');
@@ -270,9 +322,12 @@ function coreadHtml(coread, notes) {
         <span class="hint" id="save-hint">点「保存」写入服务器，换设备同样可见</span>
       </div>
     </div>`);
-  // 页尾操作条：整页批注统一在这里导出
+  // 页尾：导出 / 撤销 / 同步。
+  // 这三个都是低频动作，从顶部降权到这里 —— 顶部的位置让给概览和筛选。
   parts.push(`<div class="cr-foot">
-      <button class="dl" onclick="downloadNotes()">⬇ 下载批注</button>
+      <button class="dl" onclick="downloadMarkdown()">⬇ 导出 Markdown</button>
+      <button class="undo-btn" id="btn-undo" onclick="undoBatch()" hidden>↩ 撤销 AI 上一批</button>
+      <button class="sy ghost" id="btn-sync" onclick="crSync(this)">🔄 同步微信读书</button>
       <span class="hint" id="foot-hint"></span>
     </div>`);
   // 本机草稿未同步的提示条：放在整页最末尾（编辑与保存都在页面下方，提示跟着动作走）
@@ -297,14 +352,112 @@ function renderNotes(el, n){
   // 划线只标「你划过线」；只有想法才显示成「🟡 你：」
   if(n.mark&&!n.user){var m=document.createElement('div');m.className='u-mark';m.textContent='🟡 你划过线';el.appendChild(m)}
   if(n.user){var u=document.createElement('div');u.className='u-note';u.textContent='🟡 你：'+n.user;el.appendChild(u)}
-  if(n.ai){var a=document.createElement('div');a.className='a-note';a.textContent='🔵 闻舟：'+n.ai;el.appendChild(a)}
+  // AI 那侧走 innerHTML，好让「见第 812 段」保持可点（escHtml 已转义，安全）
+  if(n.ai){var a=document.createElement('div');a.className='a-note';a.innerHTML='🔵 闻舟：'+segRefHtml(n.ai);el.appendChild(a)}
   if(el.classList) el.classList.toggle('hl', !!n.mark);
+  // 筛选依赖这两个属性，编辑后必须同步，否则筛选结果会过期
+  el.setAttribute('data-u', n.user?1:0);
+  el.setAttribute('data-a', n.ai?1:0);
+  if(CR_FILTER && CR_FILTER!=='all' && !segMatch(el)) el.hidden=true;
+}
+// 批注文本 → 安全 HTML，「第 N 段」只在目标段确实存在时变成链接
+function segRefHtml(s){
+  return escHtml(s).replace(/第\s{0,2}(\d{1,5})\s{0,2}段/g, function(m,d){
+    return document.getElementById('seg-'+d)
+      ? '<a class="seg-ref" data-seg="'+d+'" onclick="jumpSeg('+d+',event);return false">'+m+'</a>'
+      : m;
+  });
 }
 function escHtml(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') }
 function toast(msg){
   var t=document.getElementById('cr-toast'); if(!t) return;
   t.textContent=msg; t.classList.add('on');
   clearTimeout(t._tt); t._tt=setTimeout(function(){ t.classList.remove('on') },1800);
+}
+// ---- 筛选：全部 / 我写的 / AI 批的 / 两边都有 ----
+var CR_FILTER='all';
+function segMatch(el){
+  var u=el.getAttribute('data-u')==='1', a=el.getAttribute('data-a')==='1';
+  if(CR_FILTER==='mine') return u;
+  if(CR_FILTER==='ai')   return a;
+  if(CR_FILTER==='both') return u&&a;
+  return true;
+}
+function crFilter(f){
+  CR_FILTER=f||'all';
+  var bar=document.getElementById('cr-filters');
+  if(bar) bar.querySelectorAll('button').forEach(function(b){
+    b.classList.toggle('on', b.getAttribute('data-f')===CR_FILTER);
+  });
+  applyFilter();
+  // 正在编辑的段落被这一档筛掉了 → 顺手收起，否则输入框跟着段落一起消失、内容悬空
+  if(cur!=null){
+    var el=document.getElementById('seg-'+cur);
+    if(el && el.hidden) closeEditor();
+  }
+}
+// 筛选后：空章节整章收起、目录条计数跟着变 —— 否则会出现「点进去什么都没有」
+function applyFilter(){
+  var shown=0, secs=document.querySelectorAll('#coread .cr-ch'), perSec=[];
+  secs.forEach(function(sec){
+    var body=sec.querySelector('.ch-body'); if(!body){perSec.push(0);return}
+    var n=0;
+    body.querySelectorAll('.seg').forEach(function(s){ var ok=segMatch(s); s.hidden=!ok; if(ok)n++ });
+    sec.hidden = (n===0);
+    perSec.push(n); shown+=n;
+    var c=sec.querySelector('.cth-n'); if(c) c.textContent=n+' 条';
+  });
+  document.querySelectorAll('#coread .cr-toc .toc-i').forEach(function(b,i){
+    var n=perSec[i]||0;
+    var it=b.querySelector('i'); if(it) it.textContent=n;
+    b.style.opacity = n ? '' : '.4';
+  });
+  var empty=document.getElementById('cr-empty-filter');
+  if(empty) empty.hidden = shown>0;
+}
+// ---- 跨段跳转：AI 批注里写「见第 812 段」，点一下真的跳过去 ----
+function jumpSeg(id, ev){
+  if(ev){ ev.preventDefault(); ev.stopPropagation() }
+  var el=document.getElementById('seg-'+id);
+  if(!el){ toast('第 '+id+' 段还没批注 —— 去微信读书里看原文'); return }
+  if(el.hidden) crFilter('all');            // 被当前筛选藏住了就先放开
+  // 目标在折叠的章节里 → 先展开，否则滚过去是一片空白
+  var sec = el.closest ? el.closest('.cr-ch') : null;
+  if(sec){
+    var body = sec.querySelector('.ch-body');
+    if(body && body.hidden){ body.hidden=false; if(sec.classList) sec.classList.remove('fold') }
+  }
+  try{ el.scrollIntoView({behavior:'smooth',block:'center'}) }catch(e){}
+  if(el.classList){ el.classList.add('hit'); setTimeout(function(){ el.classList.remove('hit') },1100) }
+}
+// ---- 撤销最近一批 AI 批注（只清 ai，user / mark 原样留着）----
+function batchList(){
+  var m={};
+  for(var k in COREAD_NOTES){
+    var v=COREAD_NOTES[k]||{}; if(!v.ai) continue;
+    var b=v.batch||''; if(!b) continue;      // 老数据没有批次号，不参与撤销
+    var o=m[b]||(m[b]={id:b,ts:0,ids:[]});
+    o.ids.push(k);
+    if((v.ts||0)>o.ts) o.ts=v.ts||0;
+  }
+  var out=[]; for(var x in m) out.push(m[x]);
+  out.sort(function(a,b){ return b.ts-a.ts });
+  return out;
+}
+function undoBatch(){
+  var bs=batchList(); if(!bs.length) return;
+  var b=bs[0];
+  if(!confirm('撤销最近这批 AI 批注？共 '+b.ids.length+' 条。\\n你自己的划线和你写的想法都会保留。')) return;
+  var btn=document.getElementById('btn-undo');
+  if(btn){ btn.disabled=true; btn.textContent='撤销中…' }
+  fetch('coread/undo',{method:'POST',headers:{'Authorization':'Bearer '+CR_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({batch:b.id})})
+    .then(function(r){ return r.json().then(function(j){ return {ok:r.ok,j:j} }) })
+    .then(function(x){
+      if(!x.ok) throw new Error(x.j.error||('HTTP '+x.ok));
+      toast('已撤销 '+((x.j&&x.j.cleared)||0)+' 条 AI 批注，刷新中…');
+      setTimeout(function(){ location.reload() },700);
+    })
+    .catch(function(e){ toast('撤销失败：'+((e&&e.message)||e)); if(btn) btn.disabled=false; refreshFoot(); });
 }
 // ---- 章节：折叠 / 跳转 ----
 function closeEditor(){
@@ -323,6 +476,8 @@ function tgCh(h){
 }
 function jumpCh(i){
   var sec=document.getElementById('crch-'+i); if(!sec) return;
+  // 这一章被当前筛选整章藏起来了 → 先放开筛选，否则「跳过去什么都没有」
+  if(sec.hidden) crFilter('all');
   var body=sec.querySelector('.ch-body');
   if(body&&body.hidden){ body.hidden=false; if(sec.classList)sec.classList.remove('fold') }
   var bar=document.getElementById('cr-toc');
@@ -396,21 +551,19 @@ function crCandsShow(j){
 }
 function crBind(el){
   var id=el&&el.getAttribute('data-id'); if(!id) return;
-  var h=document.getElementById('sync-hint');
-  if(h){ h.textContent='已选《'+(el.querySelector('b')?el.querySelector('b').textContent:'')+'》，正在同步…'; h.className='hint' }
+  toast('已选《'+(el.querySelector('b')?el.querySelector('b').textContent:'')+'》，正在同步…');
   fetch('coread/sync?token='+encodeURIComponent(CR_TOKEN),{method:'POST',headers:{'Authorization':'Bearer '+CR_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({bookId:id})})
     .then(function(r){ return r.json().then(function(j){ return {ok:r.ok,j:j} }) })
     .then(function(x){
       var j=x.j||{};
       if(!x.ok || j.error) throw new Error(j.error||('HTTP '+x.ok));
       crCandsShow(null);
-      if(h){ h.textContent='✓ 已绑定并同步：标记 '+(j.markedSegments||0)+' 段 / 写入 '+j.written+' 段，刷新中…'; h.className='hint ok' }
+      toast('✓ 已绑定并同步：写入 '+(j.written||0)+' 段，刷新中…');
       setTimeout(function(){ location.reload() },900);
     })
-    .catch(function(e){ if(h){ h.textContent='同步失败：'+((e&&e.message)||e); h.className='hint err' } });
+    .catch(function(e){ toast('同步失败：'+((e&&e.message)||e)) });
 }
 function crSync(btn){
-  var h=document.getElementById('sync-hint');
   if(btn){ btn.disabled=true; btn.textContent='⏳ 同步中…' }
   fetch('coread/sync?token='+encodeURIComponent(CR_TOKEN),{method:'POST',headers:{'Authorization':'Bearer '+CR_TOKEN,'Content-Type':'application/json'},body:'{}'})
     .then(function(r){ return r.json().then(function(j){ return {ok:r.ok,j:j} }) })
@@ -419,20 +572,20 @@ function crSync(btn){
       // 没匹配上：列出候选让用户点选绑定，不算失败
       if(j.candidates&&j.candidates.length){
         crCandsShow(j);
-        if(btn){ btn.disabled=false; btn.textContent='🔄 同步微信读书划线' }
-        if(h){ h.textContent='没自动认出对应笔记本，请在下面点选一本'; h.className='hint err' }
+        if(btn){ btn.disabled=false; btn.textContent='🔄 同步微信读书' }
+        toast('没自动认出对应笔记本，请在下面点选一本');
         return;
       }
       if(!x.ok || j.error) throw new Error(j.error||('HTTP '+x.ok));
       crCandsShow(null);
       if(btn){ btn.textContent='✓ 已同步' }
-      if(h){ h.textContent='✓ 已同步：划线 '+j.highlights+' 条 · 想法 '+j.thoughts+' 条 → 标记 '+(j.markedSegments||0)+' 段 / 写入 '+j.written+' 段'+(j.matched?'（命中方式：'+j.matched+'）':'')+'，刷新中…'; h.className='hint ok' }
+      toast('✓ 已同步：划线 '+(j.highlights||0)+' 条 · 想法 '+(j.thoughts||0)+' 条 → 写入 '+(j.written||0)+' 段');
       setSaveHint('已从微信读书同步 '+j.written+' 段');
       setTimeout(function(){ location.reload() },900);
     })
     .catch(function(e){
-      if(h){ h.textContent='同步失败：'+((e&&e.message)||e); h.className='hint err' }
-      if(btn){ btn.disabled=false; btn.textContent='🔄 同步微信读书划线' }
+      toast('同步失败：'+((e&&e.message)||e));
+      if(btn){ btn.disabled=false; btn.textContent='🔄 同步微信读书' }
     });
 }
 function pick(id){
@@ -466,6 +619,12 @@ function commitNote(){
     if(el)renderNotes(el,{});
   }
   persist(); refreshFoot();
+  // 编辑可能改变了这一段的归属（比如把 AI 那段清空了）→ 当前筛选下要重算可见性
+  if(CR_FILTER && CR_FILTER!=='all'){
+    applyFilter();
+    var self=document.getElementById('seg-'+cur);
+    if(self && self.hidden) closeEditor();   // 这一笔已经不属于当前档位了，跟着收起
+  }
 }
 function noteCount(){
   var n=0; for(var k in COREAD_NOTES){var v=COREAD_NOTES[k]; if(v&&(v.user||v.ai||v.mark))n++} return n;
@@ -473,6 +632,13 @@ function noteCount(){
 function refreshFoot(){
   var el=document.getElementById('foot-hint');
   if(el) el.textContent='已批注 '+noteCount()+' 段 · 保存后写入服务器，换设备同样可见';
+  // 有批次号才给撤销入口；老数据（没有 batch）不显示，避免一刀切清掉历史批注
+  var b=document.getElementById('btn-undo');
+  if(b){
+    var bs=batchList();
+    if(bs.length){ b.hidden=false; b.textContent='↩ 撤销 AI 上一批（'+bs[0].ids.length+' 条）' }
+    else b.hidden=true;
+  }
 }
 function setSaveHint(msg,ok){
   var h=document.getElementById('save-hint'); if(!h) return;
@@ -504,14 +670,39 @@ function saveNow(){
     showSyncBar();
   });
 }
-function downloadNotes(){
+// 导出 Markdown：按章分节、双色对照，能直接贴 Notion / Obsidian / flomo。
+// 以前给的是 coread-notes.json —— 普通人拿到打不开，等于没导出。
+function downloadMarkdown(){
   commitNote();
-  var blob=new Blob([JSON.stringify(COREAD_NOTES,null,2)],{type:'application/json'});
+  var bookEl=document.querySelector('.cr-book b');
+  var book=bookEl?bookEl.textContent.trim():'共读';
+  var you=0,aiN=0;
+  for(var k in COREAD_NOTES){var v=COREAD_NOTES[k];if(!v)continue;if(v.user)you++;if(v.ai)aiN++}
+  var L=['# 《'+book+'》共读笔记','',
+    '> '+noteCount()+' 段 · 🟡 你写的 '+you+' · 🔵 AI 批的 '+aiN+' · 导出于 '+new Date().toLocaleDateString(),''];
+  document.querySelectorAll('#coread .cr-ch').forEach(function(sec){
+    var tt=sec.querySelector('.cth-t');
+    L.push('## '+(tt?tt.textContent.trim():'（未分章）'),'');
+    sec.querySelectorAll('.seg').forEach(function(el){
+      var id=(el.id||'').replace('seg-','');
+      var tx=el.querySelector('.seg-text');
+      var un=el.querySelector('.u-note');
+      var an=el.querySelector('.a-note');
+      L.push('### 第 '+id+' 段','');
+      if(tx) L.push('> '+tx.textContent.trim().replace(/\\n+/g,'\\n> '),'');
+      if(un) L.push('**🟡 你**：'+un.textContent.replace(/^🟡\s*你：/,''),'');
+      if(an) L.push('','**🔵 AI**：'+an.textContent.replace(/^🔵\s*闻舟：/,''),'');
+      if(!un&&!an) L.push('_（只划过线）_','');
+      L.push('');
+    });
+  });
+  var blob=new Blob([L.join('\\n')],{type:'text/markdown;charset=utf-8'});
   var aEl=document.createElement('a');
   aEl.href=URL.createObjectURL(blob);
-  aEl.download='coread-notes.json';
+  aEl.download='共读笔记-'+book+'.md';
   aEl.click();
   URL.revokeObjectURL(aEl.href);
+  toast('已导出 Markdown');
 }
 // 输入即自动暂存到本机（不写服务器，避免频繁 KV 写）
 function autoSave(){
@@ -522,6 +713,7 @@ function autoSave(){
 }
 refreshFoot();
 showSyncBar();
+applyFilter();
 `;
 
 // ---------------------------------------------------------------------------
@@ -689,9 +881,10 @@ const CSS = `
 body{background:var(--bg);color:var(--ink);font:15px/1.7 "PingFang SC","Microsoft YaHei",sans-serif;padding:28px 14px 80px}
 .wrap{max-width:860px;margin:0 auto}
 h1{font-size:22px}.sub{color:var(--sub);font-size:13px;margin:4px 0 14px}
-.tabs{display:flex;gap:8px;margin-bottom:16px}
-.tab{flex:1;font:inherit;font-size:14px;font-weight:600;padding:10px 0;border:1px solid var(--blue);border-radius:10px;background:var(--card);color:var(--ink);cursor:pointer;box-shadow:0 1px 4px rgba(74,144,217,.15)}
-.tab.off{background:#e9e4da;color:#a39c8c;font-weight:400;border-color:#e0dacd;box-shadow:none}
+.tabs{display:flex;gap:4px;margin-bottom:14px;padding:4px;background:var(--card);border:1px solid var(--line);border-radius:13px}
+.tab{flex:1;font:inherit;font-size:13.5px;font-weight:700;padding:9px 0;border:0;border-radius:10px;background:var(--ink);color:#fff;cursor:pointer;box-shadow:0 2px 8px rgba(44,42,38,.14);transition:background .15s,color .15s}
+.tab.off{background:transparent;color:var(--sub);font-weight:500;box-shadow:none}
+.tab.off:hover{background:#f7f3ea}
 .sum-line{color:var(--sub);font-size:13px;margin-bottom:12px}
 .sum-line b{color:var(--ink)}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:18px}
@@ -742,7 +935,7 @@ button.toc-a{background:transparent;border:1px dashed var(--line);color:var(--su
 .cth{margin:14px 0 6px;color:#6b6250;font-size:15px;cursor:pointer;display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:8px}
 .cth:hover{background:#f7f2e6}
 .cth .cth-n{font-size:11px;color:var(--sub);font-weight:400}
-.cth .cth-a{margin-left:auto;color:var(--sub);font-size:12px;line-height:1;transition:transform .15s}
+.cth .cth-a{margin-left:8px;color:#a09680;font-size:11px;line-height:1;transition:transform .15s}
 .cr-ch.fold .cth-a{transform:rotate(-90deg)}
 .cth.flash{background:#fff3c4}
 .seg{padding:8px 10px;border-radius:8px;cursor:pointer;margin:2px 0}
@@ -789,6 +982,108 @@ details.imp[open]>summary::before{content:'▾ '}
 .imp-note code{background:#f2efe8;padding:1px 5px;border-radius:4px}
 #coread-json{margin-top:8px;padding:8px;background:#f6f4ee;border-radius:8px;font:11px/1.5 monospace;word-break:break-all;max-height:140px;overflow:auto;color:#7a7466}
 footer{margin-top:26px;text-align:center;color:var(--sub);font-size:12px}
+
+/* =========================================================================
+   v2 · 共读看板重设计
+   原则：暖纸底 + 双色语义（🟡 你 / 🔵 闻舟），层级靠留白和字重，不靠边框堆叠。
+   全部规则挂在 #coread 作用域内，绝不外溢到书架页。
+   ========================================================================= */
+:root{
+  --you:#CF9A15; --you-deep:#8A6410; --you-soft:#FDF7E6; --you-brd:#E8D6A2;
+  --ai:#3F76B0;  --ai-deep:#2C5A8C;  --ai-soft:#F2F7FC;  --ai-brd:#CFE0EF;
+  --both:#6B4A8F; --both-soft:#F8F3FC; --both-brd:#DCCBE8;
+}
+#coread.panel{background:transparent;border:0;padding:0;margin:0}
+
+/* ---- 头部：书名 + 一句说明 ---- */
+#coread .cr-head{display:block;padding:0}
+#coread .cr-title{display:flex;align-items:center;gap:8px;font-size:19px;font-weight:800;letter-spacing:-.01em;color:var(--ink)}
+#coread .cr-sub{display:block;font-weight:400;font-size:12px;color:var(--sub);margin-top:6px;line-height:1.7}
+
+/* ---- 四档筛选：全部 / 我写的 / AI 批的 / 两边都有 ---- */
+#coread .cr-filters{display:flex;gap:4px;margin:12px 0 14px;padding:4px;
+  background:var(--card);border:1px solid var(--line);border-radius:13px}
+#coread .cr-filters button{flex:1 1 0;min-width:0;display:inline-flex;align-items:center;justify-content:center;gap:4px;
+  background:transparent;color:var(--sub);border:0;border-radius:10px;padding:8px 4px;
+  font-size:12.5px;font-weight:600;white-space:nowrap;transition:background .15s,color .15s}
+#coread .cr-filters button:hover{background:#f7f3ea}
+#coread .cr-filters button i{font-style:normal;font-size:11px;font-weight:800;color:#57503f;
+  background:#e7e0cf;border-radius:999px;padding:1px 6px;min-width:18px;text-align:center;line-height:1.5}
+#coread .cr-filters button.on{background:var(--ink);color:#fff;box-shadow:0 2px 8px rgba(44,42,38,.16)}
+#coread .cr-filters button.on i{background:rgba(255,255,255,.2);color:#fff}
+#coread .cr-filters button.on[data-f="mine"]{background:var(--you);color:#3B2A00;box-shadow:0 2px 8px rgba(207,154,21,.28)}
+#coread .cr-filters button.on[data-f="mine"] i{background:rgba(59,42,0,.14);color:#3B2A00}
+#coread .cr-filters button.on[data-f="ai"]{background:var(--ai);box-shadow:0 2px 8px rgba(63,118,176,.26)}
+#coread .cr-filters button.on[data-f="both"]{background:var(--both);box-shadow:0 2px 8px rgba(107,74,143,.24)}
+#coread .dot{width:7px;height:7px;border-radius:50%;flex:0 0 7px;display:inline-block}
+#coread .dot.you{background:var(--you)}
+#coread .dot.ai{background:var(--ai)}
+#coread .dot.both{background:linear-gradient(135deg,var(--you) 0 50%,var(--ai) 50% 100%)}
+#coread .cr-filters button.on .dot.you{background:#3B2A00}
+#coread .cr-filters button.on .dot.ai,#coread .cr-filters button.on .dot.both{background:#fff}
+
+/* ---- 章节：左侧短竖条 + 更轻的标题 ---- */
+#coread .cr-ch{margin:0 0 2px}
+#coread .cth{margin:20px 0 6px;padding:7px 10px;font-size:14px;font-weight:700;color:#6b6250;border-radius:9px;gap:8px}
+#coread .cth::before{content:"";width:3px;height:13px;border-radius:2px;background:var(--you);flex:0 0 3px}
+#coread .cth:hover{background:#f6f1e6}
+#coread .cth .cth-n{font-size:11px;color:#a89f8d;font-weight:500}
+#coread .cth.flash{background:#FFF3C9}
+
+/* ---- 段落卡：白底轻浮起，划线那几张染成暖黄 ---- */
+#coread .seg{position:relative;background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:13px 16px;margin:10px 0;cursor:pointer;
+  box-shadow:0 1px 2px rgba(44,42,38,.03);
+  transition:border-color .15s,box-shadow .18s,transform .18s}
+#coread .seg:hover{border-color:#dcd5c6;box-shadow:0 4px 16px rgba(44,42,38,.07);transform:translateY(-1px)}
+#coread .seg.hl{background:linear-gradient(180deg,#FFFEF9 0%,#FFF9E6 100%);border-color:var(--you-brd)}
+#coread .seg.on{border-color:var(--you);box-shadow:0 0 0 3px rgba(207,154,21,.15),0 6px 20px rgba(44,42,38,.08);transform:none}
+#coread .seg.hit{animation:crHit 1.1s ease-out}
+@keyframes crHit{0%{box-shadow:0 0 0 0 rgba(63,118,176,.55)}100%{box-shadow:0 0 0 14px rgba(63,118,176,0)}}
+#coread .seg-mm{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  font-size:10.5px;color:#a89f8d;margin-bottom:7px;letter-spacing:.03em}
+#coread .seg-text{font-size:15.5px;line-height:1.85;color:#3a3630;letter-spacing:.004em}
+
+/* ---- 两侧笔迹：形状相同、颜色不同，一眼分得开 ---- */
+#coread .u-note,#coread .a-note{position:relative;margin-top:8px;padding:9px 12px;
+  font-size:13.5px;line-height:1.78;border-radius:0 10px 10px 0;white-space:pre-wrap;word-break:break-word}
+#coread .u-note{background:var(--you-soft);border-left:3px solid var(--you);color:#4A3A12}
+#coread .a-note{background:var(--ai-soft);border-left:3px solid var(--ai);color:#24455F}
+#coread .u-mark{margin-top:7px;font-size:11.5px;color:var(--you-deep);font-weight:600;letter-spacing:.02em}
+/* 批注里的「见第 812 段」—— AI 读过整本的证据，点一下就跳过去 */
+#coread .seg-ref{color:var(--ai-deep);font-weight:700;text-decoration:none;
+  border-bottom:1px dashed var(--ai-brd);cursor:pointer;padding:0 1px}
+#coread .seg-ref:hover{background:var(--ai-soft);border-bottom-style:solid}
+
+/* ---- 编辑器：像一张纸，不像一个表单 ---- */
+#editor{margin:8px 0 4px;border:1px solid var(--you-brd);border-radius:14px;
+  background:#FFFDF7;padding:14px 15px;box-shadow:0 6px 22px rgba(44,42,38,.07)}
+#editor .mm{font-size:11px;color:#a89f8d;margin-bottom:2px}
+#editor textarea{border:1px solid #e7dfd0;background:#fff;border-radius:10px;
+  padding:10px 12px;font-size:14px;line-height:1.75;margin:6px 0;resize:vertical}
+#editor textarea:focus{outline:0;border-color:var(--you);box-shadow:0 0 0 3px rgba(207,154,21,.16)}
+
+/* ---- 页尾：撤销 / 导出 ---- */
+#coread .cr-foot{gap:10px;margin-top:20px;padding-top:14px}
+#coread .undo-btn{background:#fff;color:var(--both);border:1px solid var(--both-brd);font-weight:600;font-size:12.5px;padding:7px 14px}
+#coread .undo-btn:hover{background:var(--both-soft)}
+#coread .undo-btn:disabled{opacity:.5;cursor:default}
+#coread .dl{background:var(--ink);color:#fff;font-size:12.5px;padding:7px 14px}
+#coread .sy.ghost{background:var(--card);color:var(--sub);border:1px solid var(--line);font-size:12.5px;padding:7px 14px}
+#coread .sy.ghost:hover{border-color:#d6cdba;color:var(--ink)}
+#coread .cr-filters button, #coread .cth, #coread .seg{ -webkit-tap-highlight-color:transparent }
+
+/* ---- 手机：这才是主场景 ---- */
+@media (max-width:680px){
+  body{padding:16px 10px 92px}
+  #coread .cr-title{font-size:17px}
+  #coread .cr-filters button{padding:7px 2px;font-size:11.5px;gap:3px}
+  #coread .cr-filters button i{font-size:10.5px;padding:1px 5px;min-width:17px}
+  #coread .seg{padding:12px 13px;border-radius:13px}
+  #coread .seg-text{font-size:15px;line-height:1.8}
+  #coread .u-note,#coread .a-note{font-size:13px;padding:8px 10px}
+  #editor{padding:12px}
+}
 `;
 
 // ---------------------------------------------------------------------------
@@ -882,6 +1177,9 @@ export function render({ shelf, nbBooks, nbTotal, details }, { generatedAt, core
               const n = notes?.[s.id] || {};
               const rec = { user: n.user ?? s.user ?? "", ai: n.ai ?? s.ai ?? "" };
               if (n.mark ?? s.mark) rec.mark = true;
+              // 前端算「撤销上一批」和元信息日期要靠这两个字段
+              if (n.ts) rec.ts = n.ts;
+              if (n.batch) rec.batch = n.batch;
               return [s.id, rec];
             })
         )
@@ -915,9 +1213,12 @@ export function render({ shelf, nbBooks, nbTotal, details }, { generatedAt, core
     `  <button class="tab${hasCoread ? " off" : ""}" id="tab-shelf" onclick="go('shelf')">📚 书架与笔记</button>\n` +
     `</div>`;
 
+  // 有书的时候「导入原书」是低频动作，压到页尾；没书时它是唯一入口，必须留在顶部。
   const coreadPage =
-    `<div id="page-coread" class="page"${hasCoread ? "" : " hidden"}>${crBook}${importBlock}` +
+    `<div id="page-coread" class="page"${hasCoread ? "" : " hidden"}>${crBook}` +
+    (hasCoread ? "" : importBlock) +
     (crHtml || '<div class="panel"><div class="empty">还没有共读书目 —— 上面拖入一本 EPUB 即可</div></div>') +
+    (hasCoread ? importBlock : "") +
     `</div>`;
 
   const shelfPage =
