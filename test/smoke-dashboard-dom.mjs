@@ -167,7 +167,7 @@ segs[0].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("点段落后编辑器出现", doc.getElementById("editor").hidden === false);
 check("记录当前段 id = 1", window.cur === 1, `cur=${window.cur}`);
 check("回填已有批注", doc.getElementById("edit-user").value === "已有批注" && doc.getElementById("edit-ai").value === "已有助手批注");
-check("已有的闻舟批注显示成「🔵 闻舟：」", /🔵 闻舟：/.test(doc.getElementById("seg-1").textContent), doc.getElementById("seg-1").textContent);
+check("已有的AI批注显示成「🔵 AI：」", /🔵 AI：/.test(doc.getElementById("seg-1").textContent), doc.getElementById("seg-1").textContent);
 check("页面上不再出现「🔵 助手：」", !/🔵 助手：/.test(doc.body.textContent));
 check("编辑器里有「收起」按钮", !!doc.querySelector("#editor .ed-row button.cx"));
 
@@ -200,20 +200,36 @@ doc.getElementById("btn-save").dispatchEvent(new window.MouseEvent("click", { bu
 await sleep(50);
 const noteCall = calls.find((c) => c.url.includes("coread/notes"));
 check("保存发了 POST /coread/notes", !!noteCall, JSON.stringify(calls.map((c) => c.url)));
-check("body 是 { id: {user, ai} }", noteCall?.body?.["1"]?.user === "我改了一下", JSON.stringify(noteCall?.body));
+check("body 只带 user（🔵 不在人这条通道里写）",
+  noteCall?.body?.["1"]?.user === "我改了一下" && noteCall?.body?.["1"]?.ai === undefined,
+  JSON.stringify(noteCall?.body));
 check("提示已写入服务器", /已写入服务器/.test(doc.getElementById("save-hint").textContent), doc.getElementById("save-hint").textContent);
 
-// ---------- 5. 清空 + 保存 = 删除该段批注 ----------
+// ---------- 4b. 🔵 那栏是只读的：人只能改人的 ----------
+{
+  const ta = doc.getElementById("edit-ai");
+  check("AI那栏带 readonly", ta.hasAttribute("readonly"));
+  // 就算绕过 readonly 硬改，保存时也不会提交（前后端双保险）
+  ta.value = "人想冒充 AI 写的";
+  ta.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(750);
+  doc.getElementById("btn-save").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  const c = calls[calls.length - 1];
+  check("硬改后 body 里依然没有 ai", c.body?.["1"]?.ai === undefined, JSON.stringify(c.body));
+  check("段卡上AI那句没被改掉", /已有助手批注/.test(doc.getElementById("seg-1").textContent), doc.getElementById("seg-1").textContent);
+}
+
+// ---------- 5. 清空你的想法：只清 🟡，🔵 不受影响 ----------
 const taA = doc.getElementById("edit-ai");
 taU.value = "";
-taA.value = "";
-taA.dispatchEvent(new window.Event("input", { bubbles: true }));
 await sleep(750);
 doc.getElementById("btn-save").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await sleep(50);
 const lastCall = calls[calls.length - 1];
-check("删除时 body 为空串", lastCall.body?.["1"]?.user === "" && lastCall.body?.["1"]?.ai === "", JSON.stringify(lastCall.body));
-check("段落上的批注标记消失", !/🟡 你：/.test(doc.getElementById("seg-1").textContent));
+check("body 里 user 为空串", lastCall.body?.["1"]?.user === "" && lastCall.body?.["1"]?.ai === undefined, JSON.stringify(lastCall.body));
+check("段落上的 🟡 消失", !/🟡 你：/.test(doc.getElementById("seg-1").textContent));
+check("段落上的 🔵 还在（人删不掉机器的字）", /🔵 AI：/.test(doc.getElementById("seg-1").textContent), doc.getElementById("seg-1").textContent);
 
 // ---------- 5b. 给「只划线」的段落补想法：mark 不会被丢掉 ----------
 doc.getElementById("seg-4").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -318,8 +334,8 @@ check("候选区收起", doc.getElementById("cr-cands").hidden === true);
   check("进度条 + 百分比都渲染", h.includes('class="prog"') && h.includes('<b class="pv">36%</b>'), "");
   check("百分比紧跟进度条（同一个 .bs 行里）", /class="prog"><span class="pb" style="width:36%"><\/span><\/span><b class="pv">36%<\/b>/.test(h), "");
   check("不再用会掉出卡片的绝对定位", !h.includes(".prog b{position:absolute"), "");
-  check("书卡里有「闻舟批注区」", h.includes("闻舟批注区") && !h.includes("助手批注区"), "");
-  check("页脚不再写 AI", !h.includes("🔵AI") && h.includes("🔵闻舟"), "");
+  check("书卡里有「AI批注区」", h.includes("AI批注区") && !h.includes("助手批注区"), "");
+  check("页脚不再写 AI", h.includes("🔵AI"), "");
 }
 
 // ---------- 13. v2 新增：概览 / 四档筛选 / 跨段跳转 / 撤销批次 / Markdown 导出 ----------
@@ -372,9 +388,14 @@ check("候选区收起", doc.getElementById("cr-cands").hidden === true);
 
   const html2 = doc2.getElementById("coread").innerHTML;
   check("筛选「我写的」计数 2", /我写的<i>2<\/i>/.test(html2), "");
-  check("筛选「AI 批的」计数 3", /AI 批的<i>3<\/i>/.test(html2), "");
+  check("筛选「AI批的」计数 3", /AI批的<i>3<\/i>/.test(html2), "");
   check("筛选「两边都有」计数 1", /两边都有<i>1<\/i>/.test(html2), "");
   check("四档筛选都在", doc2.querySelectorAll("#cr-filters button").length === 4);
+  check("小圆点用 d-* 类（避开全局 .ai 撑成椭圆）",
+    doc2.querySelectorAll("#cr-filters .dot.d-you").length === 1 &&
+    doc2.querySelectorAll("#cr-filters .dot.d-ai").length === 1 &&
+    doc2.querySelectorAll("#cr-filters .dot.d-both").length === 1 &&
+    doc2.querySelectorAll("#cr-filters .dot.ai").length === 0);
   check("默认全部可见 4 段", visCount() === 4, String(visCount()));
 
   const clickFilter = (f) =>
@@ -385,7 +406,7 @@ check("候选区收起", doc.getElementById("cr-cands").hidden === true);
   check("「我写的」选中态", doc2.querySelector('#cr-filters button[data-f="mine"]').classList.contains("on"));
 
   clickFilter("ai");
-  check("筛选「AI 批的」剩 3 段", visCount() === 3, String(visCount()));
+  check("筛选「AI批的」剩 3 段", visCount() === 3, String(visCount()));
 
   clickFilter("both");
   check("筛选「两边都有」剩 1 段", visCount() === 1, String(visCount()));

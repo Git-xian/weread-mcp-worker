@@ -86,24 +86,24 @@ console.log("\n== 1. 上传原文 ==");
   check("返回段数 5", r.json?.segments === 5, JSON.stringify(r.json));
 }
 
-console.log("\n== 2. 批注读写 ==");
+console.log("\n== 2. 批注读写（人这条通道只写 🟡） ==");
 {
-  const r1 = await post("/coread/notes", { 2: { user: "我的想法", ai: "助手想法" } });
+  const r1 = await post("/coread/notes", { 2: { user: "我的想法" } });
   check("POST /coread/notes 200", r1.status === 200, r1.text.slice(0, 120));
   check("changed=1 total=1", r1.json?.changed === 1 && r1.json?.total === 1, JSON.stringify(r1.json));
 
-  const r2 = await post("/coread/notes", { 4: { ai: "只写AI" } });
+  const r2 = await post("/coread/notes", { 4: { user: "第二个想法" } });
   check("增量写第二条 → total=2", r2.json?.total === 2, JSON.stringify(r2.json));
 
   const r3 = await req("/coread/notes", { headers: auth });
   check("GET /coread/notes 两条", r3.json?.total === 2, JSON.stringify(r3.json));
   check(
     "内容正确",
-    r3.json?.notes?.["2"]?.user === "我的想法" && r3.json?.notes?.["4"]?.ai === "只写AI",
+    r3.json?.notes?.["2"]?.user === "我的想法" && r3.json?.notes?.["4"]?.user === "第二个想法",
     JSON.stringify(r3.json?.notes)
   );
 
-  const r4 = await post("/coread/notes", { 2: { user: "", ai: "" } });
+  const r4 = await post("/coread/notes", { 2: { user: "" } });
   check("空内容=删除该段", r4.json?.total === 1, JSON.stringify(r4.json));
 
   const r5 = await post("/coread/notes", {}, { "Content-Type": "application/json" });
@@ -112,7 +112,7 @@ console.log("\n== 2. 批注读写 ==");
   const r6 = await post("/coread/notes", "[1,2]");
   check("数组 body 400", r6.status === 400, String(r6.status));
 
-  const r7 = await post("/coread/notes", { notes: { 5: { ai: "包裹在 notes 里也认" } } });
+  const r7 = await post("/coread/notes", { notes: { 5: { user: "包裹在 notes 里也认" } } });
   check("支持 {notes:{...}} 包裹", r7.json?.total === 2, JSON.stringify(r7.json));
 }
 
@@ -174,12 +174,32 @@ console.log("\n== 5. MCP 工具 ==");
   check("search 命中 1 段", ss.count === 1 && ss.hits[0].id === 3, JSON.stringify(ss).slice(0, 120));
 
   const aa = JSON.parse(
-    (await mcp("tools/call", { name: "coread_annotate", arguments: { annotations: [{ id: 1, ai: "AI 的划线思考" }, { id: 3, user: "我的划线思考" }] } })).result.content[0].text
+    (
+      await mcp("tools/call", {
+        name: "coread_annotate",
+        arguments: {
+          annotations: [
+            { id: 1, ai: "AI 的划线思考" },
+            // 机器只能写 🔵：这两项是人那侧的，必须被忽略（以前会被原样写进去）
+            { id: 3, ai: "AI 的第三段思考", user: "我想偷偷写一句", mark: true },
+          ],
+        },
+      })
+    ).result.content[0].text
   );
   check("annotate 写入 2 条", aa.ok === true && aa.ids.length === 2, JSON.stringify(aa));
+  check("传进来的 user / mark 被忽略", JSON.stringify(aa.ignored) === "[3]", JSON.stringify(aa.ignored));
 
   const chk = await req("/coread/notes", { headers: auth });
   check("落库后共 4 条（4/5 + 新写 1/3）", chk.json?.total === 4, JSON.stringify(chk.json?.total));
+  check("第 3 段的 🟡 没被机器写进去", !chk.json.notes["3"]?.user, JSON.stringify(chk.json.notes["3"]));
+  check("第 3 段的划线标记也没被机器伪造", !chk.json.notes["3"]?.mark, JSON.stringify(chk.json.notes["3"]));
+
+  // 反过来：人那条通道也写不了 🔵
+  const hp = await post("/coread/notes", { 4: { user: "我自己写的", ai: "人想冒充 AI" } });
+  check("HTTP 通道丢掉 ai（返回 droppedAi）", hp.json?.droppedAi === 1, JSON.stringify(hp.json));
+  const chk2 = await req("/coread/notes", { headers: auth });
+  check("第 4 段只落了 user、ai 还是空的", chk2.json.notes["4"]?.user === "我自己写的" && !chk2.json.notes["4"]?.ai, JSON.stringify(chk2.json.notes["4"]));
 
   const html2 = render({ shelf: {}, nbBooks: [], nbTotal: 0, details: {} }, { coread: COREAD, notes: chk.json.notes });
   check("看板出现新批注段", html2.includes("第一段示例正文") && html2.includes("第三段示例正文") && html2.includes("AI 的划线思考"));
@@ -205,8 +225,9 @@ console.log("\n== 7. 划线标记（mark）：划线 ≠ 评论 ==");
     JSON.stringify(g1.json?.notes?.["2"])
   );
 
-  // 部分更新：只传 ai 时，不能把已有的 user 冲掉
-  await post("/coread/notes", { 3: { ai: "补一条AI" } });
+  // 部分更新：机器只写 ai 时，不能把已有的 user 冲掉
+  await post("/coread/notes", { 3: { user: "我的划线思考" } });
+  await mcp("tools/call", { name: "coread_annotate", arguments: { annotations: [{ id: 3, ai: "补一条AI" }] } });
   const g2 = await req("/coread/notes", { headers: auth });
   check(
     "只传 ai → 原 user 保留（部分更新语义）",
@@ -225,26 +246,28 @@ console.log("\n== 7. 划线标记（mark）：划线 ≠ 评论 ==");
 
 console.log("\n== 9. 按批次撤销 AI 批注 ==");
 {
+  // 人那侧先写想法（HTTP 通道），机器侧只批 🔵（MCP 通道）—— 两条通道各管一列
+  await post("/coread/notes", { 1: { user: "撤销测试·我的" }, 3: { user: "撤销测试·两边" } });
   const a = JSON.parse(
     (
       await mcp("tools/call", {
         name: "coread_annotate",
         arguments: {
           annotations: [
-            { id: 1, user: "撤销测试·我的" },
             { id: 2, ai: "撤销测试·AI 独占" },
-            { id: 3, user: "撤销测试·两边", ai: "撤销测试·AI" },
+            { id: 3, ai: "撤销测试·AI" },
           ],
         },
       })
     ).result.content[0].text
   );
   check("annotate 自动生成批次号", typeof a.batch === "string" && a.batch.startsWith("b"), String(a.batch));
+  check("只写了 2 条（user 那侧没被碰）", a.ids.length === 2 && a.ignored === undefined, JSON.stringify(a));
 
   const u = JSON.parse(
     (await mcp("tools/call", { name: "coread_undo", arguments: { batch: a.batch } })).result.content[0].text
   );
-  check("撤销清掉 3 条 ai", u.cleared === 3, JSON.stringify(u));
+  check("撤销清掉 2 条 ai", u.cleared === 2, JSON.stringify(u));
 
   const notes = (await req("/coread/notes", { headers: auth })).json.notes;
   check("你自己的思考保留", notes["1"]?.user === "撤销测试·我的", JSON.stringify(notes["1"]));
@@ -252,7 +275,10 @@ console.log("\n== 9. 按批次撤销 AI 批注 ==");
   check("两边都有的只清 ai、留下你的", notes["3"]?.user === "撤销测试·两边" && !notes["3"]?.ai, JSON.stringify(notes["3"]));
 
   // 看板按钮走的是 HTTP 入口，单独验一遍
-  await post("/coread/notes", { 4: { ai: "再写一条", batch: "b_http" } });
+  await mcp("tools/call", {
+    name: "coread_annotate",
+    arguments: { annotations: [{ id: 4, ai: "再写一条" }], batch: "b_http" },
+  });
   const ur = await req("/coread/undo", {
     method: "POST",
     headers: { ...auth, "Content-Type": "application/json" },
@@ -260,7 +286,7 @@ console.log("\n== 9. 按批次撤销 AI 批注 ==");
   });
   check("POST /coread/undo 可用", ur.status === 200 && ur.json?.cleared === 1, JSON.stringify(ur.json));
   const notes2 = (await req("/coread/notes", { headers: auth })).json.notes;
-  check("撤销后条目消失", !notes2["4"], JSON.stringify(notes2["4"]));
+  check("撤销后 ai 清空、你的字还在", !notes2["4"]?.ai && notes2["4"]?.user === "我自己写的", JSON.stringify(notes2["4"]));
 }
 
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);

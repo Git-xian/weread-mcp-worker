@@ -291,22 +291,20 @@ const TOOLS = [
   {
     name: "coread_annotate",
     description:
-      "【共读书目】给指定段落写批注，直接落盘，看板立即可见。annotations 每项 { id, user?, ai?, mark? }：user=用户的思考（🟡），ai=助手的思考（🔵），mark=这段被用户划了线（只标记，不算评论）。没传的字段保持原状；传空字符串可清空；user/ai 都空且 mark=false 则删除该段条目。★写作要求：如果这段跟书里别处有呼应，请在 ai 里用「见第 812 段：……」的写法引用 —— 看板会把它渲染成可点击跳转，这是「读过整本」才拿得出的东西，别只就这一段论这一段。每次调用会自动生成批次号并返回 batch；写坏了可以用 coread_undo 整批回滚。",
+      "【共读书目】给指定段落写批注（只写 🔵 助手那栏），直接落盘，看板立即可见。annotations 每项 { id, ai }。★分工：🟡 用户的思考、以及他们划的线，都归用户那侧 —— 机器不代写，传 user / mark 会被忽略并在 ignored 里回给你。没传 ai 的段直接跳过；ai 传空串只清空这一段的助手批注。★写作要求：如果这段跟书里别处有呼应，请在 ai 里用「见第 812 段：……」的写法引用 —— 看板会把它渲染成可点击跳转，这是「读过整本」才拿得出的东西，别只就这一段论这一段。每次调用会自动生成批次号并返回 batch；写坏了可以用 coread_undo 整批回滚。",
     inputSchema: {
       type: "object",
       properties: {
         annotations: {
           type: "array",
-          description: "要写入的批注列表",
+          description: "要写入的批注列表（只有 ai 会被采纳）",
           items: {
             type: "object",
             properties: {
               id: { type: "integer", description: "段号" },
-              user: { type: "string", description: "用户的思考（🟡）；不传=不改，传空串=清空" },
-              ai: { type: "string", description: "助手的思考（🔵）；不传=不改。跨段呼应用「见第 N 段：……」" },
-              mark: { type: "boolean", description: "是否标记为用户划线（划线 ≠ 评论）；不传=不改" },
+              ai: { type: "string", description: "助手的思考（🔵）；必须传。跨段呼应用「见第 N 段：……」" },
             },
-            required: ["id"],
+            required: ["id", "ai"],
           },
         },
         batch: { type: "string", description: "批次号（可选）。同一轮多批批注想一起撤销时传同一个值；不传则自动生成" },
@@ -319,21 +317,26 @@ const TOOLS = [
       getCoread(); // 校验书已上传
       const batch = a.batch ? String(a.batch) : "b" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const patch = {};
+      const ignored = [];
       for (const it of list) {
+        // 机器只写 🔵：🟡 是用户自己的字，划线也是用户的事实，AI 都不代写（传了也忽略）
+        if (it.user !== undefined || it.mark !== undefined) ignored.push(it.id);
+        if (it.ai === undefined) continue;
         const rec = { batch };
-        if (it.user !== undefined) rec.user = it.user;
-        if (it.ai !== undefined) rec.ai = it.ai;
-        if (it.mark !== undefined) rec.mark = !!it.mark;
+        rec.ai = it.ai;
         patch[String(it.id)] = rec;
       }
+      if (!Object.keys(patch).length) {
+        return { ok: false, changed: 0, ignored, error: "这批里没有 ai 内容 —— user / mark 归用户那侧，机器不代写" };
+      }
       const r = mergeNotes(patch);
-      return { ok: true, changed: r.changed, totalAnnotated: r.total, ids: Object.keys(patch), batch };
+      return { ok: true, changed: r.changed, totalAnnotated: r.total, ids: Object.keys(patch), batch, ...(ignored.length ? { ignored } : {}) };
     },
   },
   {
     name: "coread_sync",
     description:
-      "【共读书目】把你在微信读书里的划线 + 想法拉进共读看板。划线只标「划过线」（不写进 🟡 评论），想法才写进 🟡「你的思考」栏。默认按共读书名自动匹配微信读书笔记本（容忍版本后缀 / 文件名差异 / 导入书标题变作者名；匹配不上会返回 candidates 候选书单，选中一个后再传 bookId 即绑定记住）。只覆盖 user/mark，AI 的 🔵 批注一律保留。",
+      "【共读书目】把你在微信读书里的划线 + 想法拉进共读看板。划线只标「划过线」（不写进 🟡 评论），想法才写进 🟡「你的思考」栏。默认按共读书名自动匹配微信读书笔记本（容忍版本后缀 / 文件名差异 / 导入书标题变作者名；匹配不上会返回 candidates 候选书单，选中一个后再传 bookId 即绑定记住）。只写 user/mark，🔵 的助手批注一律保留；★你在看板上亲手写过想法的那几段也不会被覆盖（kept = 保留了几条）。",
     inputSchema: {
       type: "object",
       properties: {
@@ -368,7 +371,7 @@ const TOOLS = [
 // ---------------------------------------------------------------------------
 function createServer() {
   const server = new Server(
-    { name: "weread-mcp-server", version: "0.2.0" },
+    { name: "weread-mcp-server", version: "0.2.1" },
     { capabilities: { tools: {} } }
   );
 
@@ -456,6 +459,10 @@ function mergeNotes(patch) {
     // 用户的编辑不会带新 batch，所以老的批次号会一路继承下来。
     if (v?.batch) next.batch = String(v.batch);
     else if (before.batch) next.batch = before.batch;
+    // synced：上次从微信读书同步进来的原文快照。
+    // 留着它，下次同步才能分清「这行字是你手写的」还是「我们上次灌的」——
+    // 手写的一律不覆盖（踩过：拉一次同步把看板上写的想法清空了）。
+    if (before.synced) next.synced = before.synced;
     cur[k] = next;
     changed++;
   }
@@ -777,14 +784,35 @@ export async function syncUserNotes({ bookId } = {}) {
   const built = buildUserNotes(coread, bookmarks, myReviews);
   const notes = readNotes();
   let written = 0;
+  let kept = 0; // 你在看板上亲手写的想法，这次同步没被覆盖
+  let conflicts = 0; // 微信读书那边的想法和你在看板上写的不一样 → 以看板为准
   for (const [id, e] of built.map) {
     const k = String(id);
-    const user = e.texts.join(" / ");
+    const fromWx = e.texts.join(" / "); // 划线不带正文，fromWx 会是空串
     const mark = !!e.mark;
     const before = notes[k] || {};
-    if (before.user === user && !!before.mark === mark) continue; // 没变化就不写
-    const next = { user, ai: before.ai || "", ts: Date.now() };
+    const local = typeof before.user === "string" ? before.user : "";
+    // 上次同步写进来的值。没有这个字段 = 老数据，一律按「手写」处理（宁可不更新，也不能吃掉）。
+    const lastSynced = typeof before.synced === "string" ? before.synced : null;
+    // ★ 关键：本地有内容且不是我们上次同步写进去的 → 是你在看板上亲手写的，同步不许动它。
+    const handWritten = !!local && local !== lastSynced;
+
+    let user;
+    if (handWritten) {
+      user = local; // ← 原样保留，绝不覆盖
+      kept++;
+      if (fromWx && fromWx !== local) conflicts++;
+    } else {
+      user = fromWx; // 没写过 / 没改过 → 跟随微信读书
+    }
+
+    const next = { user, ai: before.ai || "", ts: before.ts || Date.now() };
+    if (fromWx) next.synced = fromWx;
+    else if (lastSynced) next.synced = lastSynced;
     if (mark) next.mark = true;
+    if (before.batch) next.batch = before.batch; // 批次号别丢，否则撤销按钮就认不出来了
+    const same = before.user === user && !!before.mark === mark && (before.synced || null) === (next.synced || null);
+    if (same) continue; // 没变化就不写
     notes[k] = next;
     written++;
   }
@@ -803,6 +831,8 @@ export async function syncUserNotes({ bookId } = {}) {
     thoughts: (myReviews?.reviews || []).length,
     matchedSegments: built.map.size,
     markedSegments: entries.filter((n) => n?.mark).length,
+    kept,
+    conflicts,
     written,
     unmatched: { highlights: built.hlMiss, thoughts: built.thMiss },
     totalAnnotated: entries.length,
@@ -896,8 +926,21 @@ app.post("/coread/notes", express.json({ limit: "2mb" }), (req, res) => {
   if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
     return res.status(400).json({ error: '结构不对：需要 { "<段id>": { user, ai } }' });
   }
-  const r = mergeNotes(patch);
-  res.json({ ok: true, changed: r.changed, total: r.total });
+  // 这个端点是「人」的通道：只认 🟡 你的想法和划线。
+  // 🔵 那一栏归机器，传进来的 ai 一律丢掉。
+  const humanPatch = {};
+  let dropped = 0;
+  for (const [k, v] of Object.entries(patch)) {
+    if (!v || typeof v !== "object") continue;
+    const o = { ...v };
+    if ("ai" in o) {
+      delete o.ai;
+      dropped++;
+    }
+    humanPatch[k] = o;
+  }
+  const r = mergeNotes(humanPatch);
+  res.json({ ok: true, changed: r.changed, total: r.total, ...(dropped ? { droppedAi: dropped } : {}) });
 });
 
 app.get("/coread/notes", (req, res) => {

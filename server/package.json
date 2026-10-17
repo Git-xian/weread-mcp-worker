@@ -1,6 +1,6 @@
 {
   "name": "weread-mcp-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "微信读书 · 远程 MCP 服务端（Node/Express + Streamable HTTP）— 供 VPS 或本机部署",

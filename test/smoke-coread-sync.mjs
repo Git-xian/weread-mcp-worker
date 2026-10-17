@@ -166,6 +166,58 @@ console.log("\n== 3. 正常同步：写 🟡 栏 + 保留 AI 批注 ==");
   check("再同步一次 → 无变化（written=0）", r2.json?.written === 0, JSON.stringify(r2.json));
 }
 
+console.log("\n== 3b. 同步不能吃掉你在看板上写的想法（2026-10-17 线上踩到） ==");
+{
+  const env = { COREAD_KV: memKV(), MCP_AUTH_TOKEN: TOK, WEREAD_API_KEY: "wrk-dummy" };
+  // 预置：两段都是你在看板上手写的（没有 synced 字段 = 老数据/手写，按「手写」处理）
+  await env.COREAD_KV.put(
+    "coread-notes",
+    JSON.stringify({
+      // 第 1 段：微信读书那边这段也有想法（「我在这里的想法」），但你在面板上写了别的
+      "1": { user: "我在面板上写的新想法", ai: "AI 的想法", ts: 1, mark: true, batch: "b_keep" },
+      // 第 2 段：微信读书那边只是划了线（fromWx 为空串）—— 旧代码会把 user 写成 ""
+      "2": { user: "面板上手写", ai: "", ts: 2, mark: true },
+    })
+  );
+  await req(env, "/coread", { method: "POST", headers: { ...auth, "Content-Type": "application/json" }, body: JSON.stringify(COREAD) });
+
+  const r = await req(env, "/coread/sync?token=" + TOK, {
+    method: "POST",
+    headers: { ...auth, "Content-Type": "application/json" },
+    body: "{}",
+  });
+  const j = r.json || {};
+  const notes = (await req(env, "/coread/notes", { headers: auth })).json?.notes || {};
+  check("第 1 段：面板手写的想法没被覆盖", notes["1"]?.user === "我在面板上写的新想法", JSON.stringify(notes["1"]));
+  check("第 1 段：AI 批注还在", notes["1"]?.ai === "AI 的想法", JSON.stringify(notes["1"]));
+  check("第 1 段：批次号也没丢（撤销按钮还认得出）", notes["1"]?.batch === "b_keep", JSON.stringify(notes["1"]));
+  check("第 2 段：纯划线不再把 user 清成空串", notes["2"]?.user === "面板上手写", JSON.stringify(notes["2"]));
+  check("kept = 2（两条都原样保留）", j.kept === 2, JSON.stringify({ kept: j.kept }));
+  check("conflicts = 1（微信读书那边有不一样的想法）", j.conflicts === 1, JSON.stringify({ conflicts: j.conflicts }));
+}
+
+console.log("\n== 3c. 没在面板上改过的 → 仍然跟随微信读书更新 ==");
+{
+  const env = { COREAD_KV: memKV(), MCP_AUTH_TOKEN: TOK, WEREAD_API_KEY: "wrk-dummy" };
+  // synced 与 user 相同 = 这行字是上次同步灌进去的，用户没动过 → 允许更新
+  await env.COREAD_KV.put("coread-notes", JSON.stringify({ "1": { user: "上次同步的想法", synced: "上次同步的想法", mark: true } }));
+  await req(env, "/coread", { method: "POST", headers: { ...auth, "Content-Type": "application/json" }, body: JSON.stringify(COREAD) });
+
+  const slot = GATEWAY["/review/list/mine"].reviews[0].review;
+  const old = slot.content;
+  slot.content = "微信读书里改过的想法";
+  const r = await req(env, "/coread/sync?token=" + TOK, {
+    method: "POST",
+    headers: { ...auth, "Content-Type": "application/json" },
+    body: "{}",
+  });
+  slot.content = old;
+  const notes = (await req(env, "/coread/notes", { headers: auth })).json?.notes || {};
+  check("user 跟着微信读书更新", notes["1"]?.user === "微信读书里改过的想法", JSON.stringify(notes["1"]));
+  check("synced 快照一起更新", notes["1"]?.synced === "微信读书里改过的想法", JSON.stringify(notes["1"]));
+  check("这次没算进 kept", r.json?.kept === 0, JSON.stringify({ kept: r.json?.kept }));
+}
+
 console.log("\n== 4. 书名匹配不上：给出候选，不乱写 ==");
 {
   const env = { COREAD_KV: memKV(), MCP_AUTH_TOKEN: TOK, WEREAD_API_KEY: "wrk-dummy" };
